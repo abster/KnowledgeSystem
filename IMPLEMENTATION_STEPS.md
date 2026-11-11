@@ -6,7 +6,7 @@ Status: draft for review. `DESIGN.md` says why, `SPEC.md` says what, this docume
 
 A step is ticked only after its work is committed and you have approved it. A session implements the first unticked step, then ticks it (see `prompts/implement-step.md`).
 
-- [ ] Step 1: Project facts and the verification skill
+- [x] Step 1: Project facts and the verification skill
 - [ ] Step 2: Tooling, stub submission and Docker
 - [ ] Step 3: Normaliser, parsing, chunking and validity intervals (pure)
 - [ ] Step 4: Table fact extraction and aliases (pure)
