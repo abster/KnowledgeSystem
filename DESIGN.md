@@ -200,9 +200,44 @@ Qualifiers are the details that distinguish one fact from its siblings: term, am
 | Purchase: 30-Year Fixed Conventional $100,000 or less | 7.13% | 7.27% |
 | Purchase: 30-Year Fixed Conventional $300,000 or less | 7.25% | 7.32% |
 
-Row 1 gives entity "mortgage", qualifiers `{product: purchase, term: 30 years, rate_type: fixed, loan_type: conventional, amount_tier: ≤ $100,000}`, and the facts rate = 7.13% and APR = 7.27%. Row 2 differs only in `amount_tier` (≤ $300,000), so it has a different fact key and 7.13% vs 7.25% is not a conflict. Other examples: the Share Savings `balance_band` ($10,000–$24,999.99 pays 0.15%, dup-045) and the auto loan `term: 60 months` with `model_year: 2024–27`.
+Row 1 gives entity "mortgage", qualifiers `{product: purchase, term: 30 years, rate_type: fixed, loan_type: conventional, amount_tier: ≤ $100,000}`, and the facts rate = 7.13% and APR = 7.27%. Row 2 differs only in `amount_tier` (≤ $300,000), so it has a different fact key and 7.13% vs 7.25% is not a conflict.
 
-**Question-side extraction is rule-based and cheap** (well under a millisecond, compiled once at `build()`, no model). The question is normalised ("$100k" → 100000, "five year" and "5-year" → 60 months, "six-month" → 6 months, "2025 model" → year 2025), then matched by regexes and lexicons: terms `(\d+)[- ]?(month|year|yr)` plus word numbers; money with "or less", "under", "between"; years near "model"; rate words (rate, APY, APR, dividend); segment (business, personal); product names from the alias list built at ingest. Ingest and answer share **one normaliser** so "60-month" in a question and "60 months" in a table give the same qualifier value. The failure direction is safe: a missed qualifier lowers the qualifier-match score (toward the slow path or a refusal), and a wrongly detected qualifier only biases ranking because qualifiers boost and score facts rather than hard-filter them. Known gap: unusual phrasing such as "a year and a half" does not parse.
+**How entity, attribute and qualifiers are identified.** For tables this is rule-based, and the rules come from patterns observed in the snapshots. The attribute comes from the column header, matched whole against an allow-listed lexicon built from the header survey (about 50 meaningful shapes, reviewed by hand; see Table Fact Extraction). The entity comes from the row-label column, or from the nearest heading when that heading matches a known product alias (aliases are built at ingest from page titles and headings). Qualifiers are parsed from the row label and qualifier columns by regexes written for the formats seen in the data: money ranges (`$100,000 or less`, `$25,000 – $99,999.99`, hyphen or en dash), terms (`30-Year`, `17-Month`), product words and model years (`2024-27`). A format the rules have not seen produces no fact (precision-first), not a guess. For prose, a Haiku-class LLM proposes entity, attribute and qualifiers at ingest, constrained to the same attribute names and qualifier keys, and the result is cached.
+
+**Question-side extraction** reads the same details out of the member's question, using simple pattern rules (no model, well under a millisecond). The steps:
+
+1. **Normalise** the wording to one standard form with hard-coded rules (regexes plus small word lists, such as the number words "five" → 5): "$100k" becomes 100000, "five year" and "5-year" become 60 months, "2025 model" becomes year 2025. The rules cover the phrasings seen in the public questions and the table formats, and are extended by adding a rule and a test, not learned.
+2. **Spot the details** with small patterns and word lists: a number followed by month or year is a term; "or less", "under" or "between" next to a dollar amount is an amount tier; a year near "model" is a model year; rate, APY or APR names the measure; business or personal names the segment; product names come from the alias list built at ingest.
+
+Example: "What is the APR for a five year auto loan on a 2025 model?" gives `{measure: APR, term: 60 months, model_year: 2025}`. The table row for the same loan carries `term: 60 months` and `model_year: 2024-27`, so the question matches it.
+
+Ingest and answer share **one normaliser**, so "60-month" in a question and "60 months" in a table produce the same value.
+
+**Principle: fail closed.** Hand-written rules can never be shown to cover every phrasing, so the fast path must earn each question instead of being the default. A question is answered on the fast path only if the system can show it understood the whole question. Anything it cannot explain goes to the slow path. A *missed* detail is already safe (the qualifier-match score drops). A *wrong* detail is the real risk: a fact that matches the wrong value looks like a perfect match, and the validators cannot catch it because they check the answer against the same facts. Five guards address it, none of which add latency:
+
+1. **Full-coverage check.** Each rule records the span of question text it consumed. After extraction, whatever remains must consist only of neutral words from a short allowlist ("what", "is", "the", "for", "a", "loan", "rate" and similar) and the entity tokens. Any other word or number sends the question to the slow path. This catches modifiers such as "over", "between", "at least", unparsed words such as the "half" in "a year and a half", and stray years such as "2022", including ones nobody anticipated, because an unknown word fails by default.
+2. **Closed fast-path grammar.** The fast path handles only questions that fully match one of about 10 anchored patterns, for example `what is the {measure} for a {term} {product}` or `how many {entity}`. Each pattern has golden tests. A partial match is a non-match. The accepted questions are a short tested list, not an open-ended rule set.
+3. **Sibling selection check.** When sibling facts differ only in a qualifier (the $100,000 and $300,000 tiers), the question must select exactly one of them. If it selects none, several, or sits within a boundary of a tier edge, the tier policy applies or the question goes to the slow path.
+4. **Qualifier contradiction rule.** A fact that carries a qualifier contradicting one the question stated is ineligible. A qualifier the question never mentioned is handled by the tier policy.
+5. **Measured precision.** The calibration set includes questions with unusual modifiers, ranges and term phrasings. `τ_accept` is chosen so fast-path precision on a held-out split meets the target (about 97%). If it does not, the grammar is narrowed.
+
+*Residual risk, stated openly:* these guards stop wording the rules do not recognise. They do not stop a recognised pattern that has a bug (for example "$1.5k" parsed as 15). That is covered only by golden and property tests on the normaliser and each pattern. The cost of the guards is a smaller fast-path share; the eval report shows that share. If more than about 5% of questions go slow, p95 latency becomes the slow-path latency, which costs a few points of the speed score (15% of the total). A wrong tier zeroes an item worth far more, so the trade is accepted.
+
+#### LLM extraction: trade-off and decision
+
+| | Rules + guards | LLM extraction (Haiku, constrained JSON) |
+|---|---|---|
+| Handles odd phrasing | no, falls to the slow path | yes |
+| Latency | well under 1 ms | about 0.5–1.5 s on every question |
+| Determinism | full | not guaranteed even at temperature 0, which risks the consistency score |
+| Failure mode | predictable and unit-testable | silent, plausible and varying |
+| Needs the Anthropic API key | no | yes; without it, back to rules |
+| Cost | none | one call per question |
+
+An LLM does not remove wrong details; it trades testable mistakes for unpredictable ones. Decisions:
+
+* **Query time:** rules plus guards 1–5. An optional **LLM cross-check** (rules and the LLM parse the question independently; the fast path runs only if they agree and the coverage check passes) is behind a flag, **off by default**. It is turned on only if the held-out calibration shows fast-path precision below target. When on, the LLM call runs in parallel with retrieval, is cached by normalised question, and is skipped for questions with no numbers or qualifier words.
+* **Ingest time:** an LLM verifies each *distinct* table row-label parse once (offline, cached, no query latency). A disagreement quarantines that row's facts (same outcome as a failed plausibility gate). This checks the table side of every match for free.
 
 #### Extraction cache and the Anthropic API key
 
@@ -348,7 +383,7 @@ sequenceDiagram
 
 * **Cache** - Key = (canonical fact key, target_ord), looked up by embedding nearest neighbour above a similarity threshold so paraphrases share an entry. Persisted across the repeat pass.
 * **Fast path** - Hybrid retrieval (`top_k` ≈ 20 chunks, unrelated to `target_ord`) → fact resolver → a deterministic template or extractive answer, optionally polished by a light model (Haiku 5.5, short output, 1.5 s timeout).
-* **Confidence score** - Computed locally from similarity, margin, qualifier match, entity match and the conflict-resolution state, with hard caps for missing templates, unresolved conflicts, aggregates and multi-page lists. Two calibrated thresholds, `τ_floor` and `τ_accept`, decide between refusal, the slow path and the fast answer. See Confidence Score and Thresholds below.
+* **Confidence score** - Computed locally from similarity, margin, qualifier match, entity match and the conflict-resolution state, with hard caps for missing templates, unresolved conflicts, aggregates, multi-page lists, and any question that fails the fail-closed guards in Qualifiers. Two calibrated thresholds, `τ_floor` and `τ_accept`, decide between refusal, the slow path and the fast answer. See Confidence Score and Thresholds below.
 * **Slow path** - Strong model (Sonnet 5.5, Opus 5.5 configurable) receives the resolved facts, parent chunks and conflict notes, and returns structured output at temperature 0.
 * **Validators** (both paths) - Every number in the answer appears in the cited evidence; no loser or stale value in `text`; refusal text has no digits and `confident=False`; the winner's URL is cited.
 * **Tier policy** - When the question omits a qualifier, state the assumed default tier (configurable per attribute) and avoid quoting unrelated tiers' numbers. Thresholds are calibrated on a training split of the public eval plus synthetic paraphrases, to avoid overfitting 40 questions.
@@ -384,7 +419,7 @@ Confidence `c` ∈ [0, 1] is computed locally from the retrieval and fact-matchi
 | Resolution state | Unique winner 1.0; conflict resolved by strategy 1 or 2: 0.9; by strategy 3: 0.7; unresolved: 0 |
 | Template available | Whether a template exists for the question shape |
 
-`c` = a weighted sum of the first four signals, multiplied by the resolution state, with hard caps below `τ_accept` when no template exists for the (shape, attribute type) pair, when the conflict is unresolved, when the question is an aggregate, or when it is a list whose items span more than one page or section (completeness cannot be guaranteed, e.g. dup-034 across personal and business card pages). These always go to the slow path. A list whose items all come from a single table is complete by construction and may use the list template.
+`c` = a weighted sum of the first four signals, multiplied by the resolution state, with hard caps below `τ_accept` when the question fails the full-coverage check or does not match the fast-path grammar (see Qualifiers), when no template exists for the (shape, attribute type) pair, when the conflict is unresolved, when the question is an aggregate, or when it is a list whose items span more than one page or section (completeness cannot be guaranteed, e.g. dup-034 across personal and business card pages). These always go to the slow path. A list whose items all come from a single table is complete by construction and may use the list template.
 
 Two thresholds, with a clear meaning each:
 
@@ -592,7 +627,8 @@ Whether to answer from retrieved text or from resolved facts. Text-only answers 
 5. Tier policy conflict in the public eval: dup-009 expects both 7.13 and 7.25, dup-011 expects one tier only.
 6. Questions that mention a past date in text while `as_of=null` are answered as current (by design).
 7. Ingest time depends on the number of fact-bearing prose chunks sent to the LLM; not yet measured. Calls run concurrently, results are cached, and the shipped cache removes the cost at grading time.
-8. The question-shape and qualifier rules and the alias-list construction are the hardest rule-based parts; they get golden tests and are specified in SPEC.md.
+8. The question-shape and qualifier rules and the alias-list construction are the hardest rule-based parts; they get golden tests and are specified in SPEC.md. Their residual risk (a recognised pattern with a bug) is covered only by tests; the fail-closed guards shrink the fast-path share, which must be measured.
+   - Whether to enable the query-time LLM cross-check depends on the calibration result.
 9. The cross-column invariants (APY ≥ dividend rate, APR ≥ rate) must be verified against the full data before they are enforced; they start as quarantine triggers.
 10. A run with no Anthropic API key refuses every question that needs the slow path; NOTES.md must say so.
 
