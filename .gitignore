@@ -1,0 +1,14 @@
+results/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+snapshots/0*/
+snapshots_zip/
+.vscode/
+.claude/settings.local.json
+# derived from the website data (not redistributable): extraction cache, vector store, model weights
+.kk_cache/
+*.lance/
+models/
+.venv/
