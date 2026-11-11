@@ -2,6 +2,21 @@
 
 Status: draft for review. `DESIGN.md` says why, `SPEC.md` says what, this document says in which order and how each piece is verified. Section references like `SPEC 6.7.2` point into `SPEC.md`.
 
+## Progress
+
+A step is ticked only after its work is committed and you have approved it. A session implements the first unticked step, then ticks it (see `prompts/implement-step.md`).
+
+- [ ] Step 1: Project facts and the verification skill
+- [ ] Step 2: Tooling, stub submission and Docker
+- [ ] Step 3: Normaliser, parsing, chunking and validity intervals (pure)
+- [ ] Step 4: Table fact extraction and aliases (pure)
+- [ ] Step 5: Conflicts, fact resolution, tiers, history and templates (pure over in-memory facts)
+- [ ] Step 6: Question understanding, validators and confidence (pure)
+- [ ] Step 7: Storage, embeddings, retrieval and ingest wiring
+- [ ] Step 8: LLM client, prose facts and the extraction cache
+- [ ] Step 9: Fast-path `answer()`, cache and calibration
+- [ ] Step 10: Slow path, packaging and README
+
 ## 1. How every step works
 
 There are ten steps. Each is self-contained: it can be finished, tested and evaluated without any later step, and it leaves the repository in a state where `make verify` passes and the public eval runs. A step is one reviewable change, which MAY be split into several commits inside the step as long as every commit passes `make verify`.
