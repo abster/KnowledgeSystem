@@ -748,7 +748,7 @@ Each criterion is checked by a named test or report.
 
 | ID | Criterion |
 |---|---|
-| AC-1 | On the public eval, overall accuracy is at least 0.90 and no category is below 0.80. |
+| AC-1 | On the public eval, overall accuracy is at least 0.90 and no category is below 0.80. 0.90 is the pass line, not a target to push toward 100%: the public eval has 40 questions, so each question is 2.5 points and the last points can only come from fitting to those questions. |
 | AC-2 | `stale_trap_hits` is 0 and `errors` is 0. |
 | AC-3 | Every `should_refuse` item is refused with `confident=False` and no digit beyond the question's. |
 | AC-4 | `dup-006` (`as_of=2026-05-31`) returns 3.90% and does not contain 4.00%. |
@@ -761,6 +761,7 @@ Each criterion is checked by a named test or report.
 | AC-11 | `make verify` passes locally and in Docker. |
 | AC-12 | Deleting the shipped extraction cache and re-running ingest with a key reproduces the same facts (compared by fact key and value). |
 | AC-13 | Every `history` golden case (changed once, changed several times, unchanged, gap in the history, unresolved conflict at some ordinal) renders the expected text or escalates to the slow path as specified, and no history answer states an exact change date. |
+| AC-14 | End-to-end accuracy on the held-out set (generated, paraphrased, negative and adversarial questions that were not used to tune anything) is reported next to the public accuracy, and the held-out figure is within 0.03 of it. A public accuracy above 0.95 triggers a leakage review (special-cased wording, thresholds tuned on public items, grammar patterns copied from public questions) before it is accepted. |
 
 ## 21. Spec decisions for review
 

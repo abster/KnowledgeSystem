@@ -35,8 +35,8 @@ Until the fast path exists, `answer()` is the refuse-all stub from step 2, so Ev
 | 1 | Not runnable yet (no `submission/`); record the starter's 0.093 for reference |
 | 2 | Record the refuse-all baseline |
 | 3 to 8 | Unchanged from the baseline, `errors = 0`. From step 7 the real `ingest` runs inside the eval, so `ingest_seconds` is recorded and watched |
-| 9 | Strictly higher; first real score; reported per category with the share answered on the fast path |
-| 10 | Strictly higher; the target is accuracy of at least 0.90 (SPEC AC-1) |
+| 9 | Strictly higher; first real score; reported per category with the share answered on the fast path, and held-out accuracy next to the public figure |
+| 10 | Strictly higher; accuracy of at least 0.90 (SPEC AC-1) with held-out accuracy within 0.03 of it (SPEC AC-14). 0.90 is the pass line; the work does not push toward 99% on the 40 public questions |
 
 ## 2. Test data policy
 
@@ -63,6 +63,7 @@ Until the fast path exists, `answer()` is the refuse-all stub from step 2, so Ev
   * Loser, stale or expired values never appear in `Answer.text`; refusals have `confident=False` and no digits beyond the question's.
   * Precision first: any doubt in extraction means no fact. The fast path is fail closed (full-coverage check).
   * Tunable numbers live only in `config.json`; thresholds come from calibration, never from hand tuning against the public questions.
+  * Report public accuracy and held-out accuracy together (once the held-out set exists, from step 9). Never tune thresholds, patterns or prompts against the public questions; a gain on the public eval alone is weak evidence.
   * Never edit `harness/`, `eval/` or the snapshots; never commit snapshot text, `.env`, the extraction cache or model weights.
   * Never print or log the API key.
   * Workflow: the two skills; ask before deviating from DESIGN or SPEC.
@@ -72,6 +73,7 @@ Until the fast path exists, `answer()` is the refuse-all stub from step 2, so Ev
   * Require recording the environment in each saved report and comparing only like with like.
   * Define the gate for steps that cannot change accuracy: the eval must run and be unchanged.
   * Replace "strictly higher" with "strictly higher for steps that are meant to improve it".
+  * From step 9, add held-out accuracy to the report and the regression check, and flag any gain concentrated in one or two questions or a public-minus-held-out gap above 0.03.
 * Add `submission/cache/` and `submission/models/` to `.gitignore`.
 
 **Out of scope.** Any code.
@@ -302,7 +304,7 @@ Until the fast path exists, `answer()` is the refuse-all stub from step 2, so Ev
 
 **Verify.** `make verify`; Eval A strictly higher; report the share answered on the fast path, the share refused, per-category scores, held-out fast-path precision, and the latency distribution.
 
-**Exit criteria.** Held-out fast-path precision meets SPEC AC-9, or you decide how to narrow the grammar. Every public question answered wrongly on the fast path is listed with its cause.
+**Exit criteria.** Held-out fast-path precision meets SPEC AC-9, or you decide how to narrow the grammar. Public and held-out accuracy are reported side by side. Every public question answered wrongly on the fast path is listed with its cause, and a fix is accepted only if it is a general rule, not wording-specific.
 
 ---
 
@@ -329,7 +331,7 @@ Until the fast path exists, `answer()` is the refuse-all stub from step 2, so Ev
 
 **Verify.** `make verify`; `docker compose run eval`; Eval A strictly higher and at least 0.90 accuracy (SPEC AC-1); Eval S; the no-key run.
 
-**Exit criteria.** All twelve acceptance criteria in SPEC 20 are checked and reported, with any miss explained. You approve the final report.
+**Exit criteria.** All acceptance criteria in SPEC 20 (AC-1 to AC-14) are checked and reported, with any miss explained, including the public versus held-out comparison and the leakage review if public accuracy exceeds 0.95. You approve the final report.
 
 ## 4. Plan notes
 
