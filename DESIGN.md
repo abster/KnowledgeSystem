@@ -76,7 +76,7 @@ Chunks and facts are not split by path: both paths use both. The real difference
 | Qualifiers and question extraction | Core of the match and of the confidence score | Run first anyway, because the confidence gate decides which path a question takes |
 | Template | Renders the answer text; optional light-model polish, off by default | Not used; the model writes the answer from structured output |
 | Validators | Yes | Yes |
-| LLM | None by default (optional polish and cross-check flags) | Sonnet 5.5, structured output, temperature 0 |
+| LLM | None by default (optional polish and cross-check flags) | Sonnet 5.5, structured output, temperature 0; also all change/history questions, which see the fact-history view |
 
 Haiku also appears at ingest, to extract facts from prose (cached), and at ingest to verify table row-label parses. That is separate from answer-time use.
 
@@ -196,7 +196,7 @@ Local `bge-small-en-v1.5` via fastembed (ONNX Runtime): 384 dimensions, CPU only
 | API embeddings (Voyage, OpenAI) | best quality | needs network and key at ingest; non-reproducible |
 | TF-IDF / hashed rules | trivial | weak on paraphrase ("lost debit card" vs "card replacement") |
 
-Embedding happens in ingest only, so it does not affect answer speed. Estimated <2 minutes for ~10k chunks on 8 cores (to be measured, and deduplication means only new chunks are embedded for each later snapshot). The model weights must be available offline (see Reflections).
+Embedding happens in ingest only, so it does not affect answer speed. Estimated <2 minutes for ~10k chunks on 8 cores (to be measured, and deduplication means only new chunks are embedded for each later snapshot). The model weights are bundled in the submission folder (`models/`, kept out of git), so ingest needs no download and works offline.
 
 ### Fact Model and Conflict Detection
 
@@ -260,7 +260,7 @@ An LLM does not remove wrong details; it trades testable mistakes for unpredicta
 
 At ingest the Anthropic API key is needed only for prose fact extraction; table rows use rules and need none. Without it the prose facts are missing, and prose questions fall to the slow path (which also needs the key) and are refused. To avoid depending on the key at grading time, **the extraction cache is shipped with the submission** (keyed by chunk content hash). If the hidden eval uses the same snapshots, ingest then needs no key and gives identical results every run. The cache holds text derived from the website data, so it is kept out of git like the snapshots and travels only inside the submission folder.
 
-**Conflict definition (explicit call-out):** a conflict is a *coexisting contradiction*. The same fact key carries different normalised values on different live pages within the same snapshot, including a stale or expired page that is still live (e.g. a promo page still showing an old rate). These are **not** conflicts: different tiers, terms or qualifiers; rate vs APY; formatting differences (`3.5%` = `3.50 %`); and a value that was simply replaced over time (that is history, queried through `as_of`). Conflicts are scanned over all snapshots and de-duplicated by (topic, value set). `conflicts.scope=latest|all` is configurable and tuned against the selftest gold.
+**Conflict definition (explicit call-out):** a conflict is a *coexisting contradiction*. The same fact key carries different normalised values on different live pages within the same snapshot, including a stale or expired page that is still live (e.g. a promo page still showing an old rate). These are **not** conflicts: different tiers, terms or qualifiers; rate vs APY; formatting differences (`3.5%` = `3.50 %`); and a value that was simply replaced over time (that is history, queried through `as_of`). Conflicts are scanned over all snapshots and de-duplicated by (topic, value set).  The scan always covers all snapshots, not only the latest, because a planted contradiction may have been fixed later; the cost is possible extra entries for contradictions that no longer exist.
 
 #### Conflict Resolution
 
@@ -268,7 +268,7 @@ Applied in order. The first strategy that separates the values decides, and **th
 
 1. **effective_date** - The value with the later effective date wins. A value whose `expiry_date` precedes the snapshot date is expired and loses.
 2. **source_authority** - If effective dates are equal or unknown, the more authoritative source wins: rate sheet / disclosure / fee schedule > product page > calculator > FAQ / learn article > blog > newsroom / press release / promo banner.
-3. **snapshot_recency** (an added tie-break beyond effective date and authority) - Tie-break by newest snapshot / fetch time.
+3. **snapshot_recency** (approved tie-break beyond effective date and authority; weaker evidence, and the reason text says so) - Tie-break by newest snapshot / fetch time.
 4. **unresolved** - `resolution=None`. Queries that touch the key return `confident=False` unless the slow path can justify a choice from the text.
 
 Example `reason`: `strategy=effective_date: 5.39% effective 2026-09-25 beats 5.34% effective 2026-06-09; calculator page is stale`.
@@ -396,13 +396,23 @@ sequenceDiagram
     Note over S,L: No key, timeout or error: return the fast-path answer
 ```
 
-* **Cache** - Key = (canonical fact key, target_ord), looked up by embedding nearest neighbour above a similarity threshold so paraphrases share an entry. Persisted across the repeat pass.
+* **Cache** - Key = (shape, entity, sorted qualifiers, `target_ord`), built by the same rules as question extraction. Only questions that pass the full-coverage check are cached or looked up; a question that fails it is never served from the cache. Paraphrases share an entry when they parse to the same key. There is no embedding-similarity lookup, because "30-year" and "15-year" questions are close in embedding space and a near-neighbour hit could return the wrong tier. Persisted across the repeat pass. Failures and refusals caused by errors are not cached.
 * **Fast path** - Hybrid retrieval (`top_k` ≈ 20 chunks, unrelated to `target_ord`) → fact resolver → a deterministic template or extractive answer, optionally polished by a light model (Haiku 5.5, short output, 1.5 s timeout).
 * **Confidence score** - Computed locally from similarity, margin, qualifier match, entity match and the conflict-resolution state, with hard caps for missing templates, unresolved conflicts, aggregates, multi-page lists, and any question that fails the fail-closed guards in Qualifiers. Two calibrated thresholds, `τ_floor` and `τ_accept`, decide between refusal, the slow path and the fast answer. See Confidence Score and Thresholds below.
 * **Slow path** - Strong model (Sonnet 5.5, Opus 5.5 configurable) receives the resolved facts, parent chunks and conflict notes, and returns structured output at temperature 0.
 * **Validators** (both paths) - Every number in the answer appears in the cited evidence; no loser or stale value in `text`; refusal text has no digits and `confident=False`; the winner's URL is cited.
 * **Tier policy** - When the question omits a qualifier such as the amount tier, see Tier Policy below. Only the slow path applies it.
 * **Calibration** - Thresholds are calibrated on a training split of the public eval plus synthetic paraphrases, to avoid overfitting 40 questions.
+
+#### Change and History Questions
+
+The hidden set includes questions about things that changed between snapshots ("has the 17-month certificate rate changed?", "when did the Hy-Vee branch close?"). They are different from `as_of` questions: the member wants the difference, not the value at one date.
+
+* **Detection.** A rule over the question (change words such as "changed", "still", "used to", "was it ever", "since", "history", "new", "no longer") marks it a change question. `as_of` is still the only source of a target date; the question text is not parsed for dates.
+* **Path.** Always the slow path. The fast path has no history template.
+* **Fact-history view.** For the facts the question matches, the system supplies every distinct value with its validity interval (`first_seen_date` to `last_seen_date`, snapshot ordinals) up to `target_ord`, newest last, plus the pages that introduced or dropped them. The model answers only from that view.
+* **Validators.** Number grounding allows every value in the supplied history. The stale check is relaxed for these questions: an older value is allowed in the text only when the view labels it as an earlier value and the question asks about change. The citation check cites the newest page.
+* **Without an Anthropic API key,** change questions are refused.
 
 #### Tier Policy
 
@@ -648,8 +658,8 @@ Two project skills with **distinct names**. Each states that it supersedes the u
 Whether to answer from retrieved text or from resolved facts. Text-only answers are simpler but let a stale paragraph with a plausible number through, and the scorer zeroes any stale value. Resolved facts give correctness and consistency, but they add an extraction layer whose qualifier normalisation ("60-month" vs "5 year", "$100k" vs "$100,000") is the likeliest place for silent errors. The compromise is rule-based table extraction, cached prose extraction, a validator that checks every number against evidence, and the slow path as a safety net.
 
 ### Risks and open items
-1. Embedding weights: bundle them in the submission folder, or download on first run? An offline grader makes a download a total-failure risk.
-2. The `first_seen/last_seen` interval refinement and the `snapshot_recency` tie-break (step 3) are additions to the original proposal; revisit if the eval shows they hurt.
+1. Embedding weights are bundled in the submission folder (decided), since an offline grader would make a download a total-failure risk. Open: confirm the folder size is acceptable.
+2. The `first_seen/last_seen` interval refinement and the `snapshot_recency` tie-break (step 3) are approved additions to the original proposal; revisit if the eval shows they hurt.
 3. Confidence thresholds calibrated on 40 questions can overfit. Mitigated by synthetic paraphrases and a held-out split.
 4. LLM extraction nondeterminism, mitigated by caching and temperature 0.
 5. Tier policy against the public eval: dup-009 expects both 7.13 and 7.25, dup-011 expects one tier only. The Tier Policy rule (specific product gives a range, generic question gives the default tier) is a hypothesis that must hold on held-out paraphrases, not only on these two questions.
