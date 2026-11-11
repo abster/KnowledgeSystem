@@ -65,6 +65,21 @@ flowchart LR
     Harness -->|"conflicts()"| Store
 ```
 
+### What each path uses
+
+Chunks and facts are not split by path: both paths use both. The real difference is that the fast path answers only from facts and templates, while the slow path also reads raw text.
+
+| Component | Fast path | Slow path |
+|---|---|---|
+| Chunks (raw text, in the vector store) | Retrieval searches them to find the matching facts; each fact points back to its chunk for the URL, quote and dates | The model reads the matched parent chunks (full table, header, footer note) |
+| Facts (structured values, extracted at ingest) | The answer is built from the winning fact through a template | The model receives the resolved facts and conflict notes along with the chunks |
+| Qualifiers and question extraction | Core of the match and of the confidence score | Run first anyway, because the confidence gate decides which path a question takes |
+| Template | Renders the answer text; optional light-model polish, off by default | Not used; the model writes the answer from structured output |
+| Validators | Yes | Yes |
+| LLM | None by default (optional polish and cross-check flags) | Sonnet 5.5, structured output, temperature 0 |
+
+Haiku also appears at ingest, to extract facts from prose (cached), and at ingest to verify table row-label parses. That is separate from answer-time use.
+
 ### Knowledge System Interface
 
 The contract is fixed by `harness/contract.py`: `build()` returns an object with `ingest`, `answer` and `conflicts`. The harness imports `solution.py` in-process and calls the methods directly, so there is no network API, serialisation or authentication layer. The three methods map to three phases:
@@ -217,8 +232,8 @@ Ingest and answer share **one normaliser**, so "60-month" in a question and "60 
 
 1. **Full-coverage check.** Each rule records the span of question text it consumed. After extraction, whatever remains must consist only of neutral words from a short allowlist ("what", "is", "the", "for", "a", "loan", "rate" and similar) and the entity tokens. Any other word or number sends the question to the slow path. This catches modifiers such as "over", "between", "at least", unparsed words such as the "half" in "a year and a half", and stray years such as "2022", including ones nobody anticipated, because an unknown word fails by default.
 2. **Closed fast-path grammar.** The fast path handles only questions that fully match one of about 10 anchored patterns, for example `what is the {measure} for a {term} {product}` or `how many {entity}`. Each pattern has golden tests. A partial match is a non-match. The accepted questions are a short tested list, not an open-ended rule set.
-3. **Sibling selection check.** When sibling facts differ only in a qualifier (the $100,000 and $300,000 tiers), the question must select exactly one of them. If it selects none, several, or sits within a boundary of a tier edge, the tier policy applies or the question goes to the slow path.
-4. **Qualifier contradiction rule.** A fact that carries a qualifier contradicting one the question stated is ineligible. A qualifier the question never mentioned is handled by the tier policy.
+3. **Sibling selection check.** When sibling facts differ only in a qualifier (the $100,000 and $300,000 tiers), the question must select exactly one of them. If it selects none, several, or sits within a boundary of a tier edge, the question goes to the slow path, which applies the Tier Policy.
+4. **Qualifier contradiction rule.** A fact that carries a qualifier contradicting one the question stated is ineligible. A qualifier the question never mentioned sends the question to the slow path under the Tier Policy.
 5. **Measured precision.** The calibration set includes questions with unusual modifiers, ranges and term phrasings. `τ_accept` is chosen so fast-path precision on a held-out split meets the target (about 97%). If it does not, the grammar is narrowed.
 
 *Residual risk, stated openly:* these guards stop wording the rules do not recognise. They do not stop a recognised pattern that has a bug (for example "$1.5k" parsed as 15). That is covered only by golden and property tests on the normaliser and each pattern. The cost of the guards is a smaller fast-path share; the eval report shows that share. If more than about 5% of questions go slow, p95 latency becomes the slow-path latency, which costs a few points of the speed score (15% of the total). A wrong tier zeroes an item worth far more, so the trade is accepted.
@@ -386,7 +401,20 @@ sequenceDiagram
 * **Confidence score** - Computed locally from similarity, margin, qualifier match, entity match and the conflict-resolution state, with hard caps for missing templates, unresolved conflicts, aggregates, multi-page lists, and any question that fails the fail-closed guards in Qualifiers. Two calibrated thresholds, `τ_floor` and `τ_accept`, decide between refusal, the slow path and the fast answer. See Confidence Score and Thresholds below.
 * **Slow path** - Strong model (Sonnet 5.5, Opus 5.5 configurable) receives the resolved facts, parent chunks and conflict notes, and returns structured output at temperature 0.
 * **Validators** (both paths) - Every number in the answer appears in the cited evidence; no loser or stale value in `text`; refusal text has no digits and `confident=False`; the winner's URL is cited.
-* **Tier policy** - When the question omits a qualifier, state the assumed default tier (configurable per attribute) and avoid quoting unrelated tiers' numbers. Thresholds are calibrated on a training split of the public eval plus synthetic paraphrases, to avoid overfitting 40 questions.
+* **Tier policy** - When the question omits a qualifier such as the amount tier, see Tier Policy below. Only the slow path applies it.
+* **Calibration** - Thresholds are calibrated on a training split of the public eval plus synthetic paraphrases, to avoid overfitting 40 questions.
+
+#### Tier Policy
+
+A **tier** is one level of a price list: the "$100,000 or less" and "$300,000 or less" mortgage rows, or a Share Savings balance band. The policy covers a question that does not say which tier it means, such as "What are the mortgage rates right now?" (dup-011) or "the interest rate for a 30-year mortgage" (dup-009). The aim is to give a defensible, labelled answer instead of dumping every tier, because the scorer zeroes an item if a wrong-tier value appears.
+
+* **Detection.** The sibling selection check (guard 3 under Qualifiers) finds that the question matches several sibling facts that differ only in one qualifier (or none of them), and the confidence gate caps the question below `τ_accept`.
+* **Path.** The fast path never guesses a tier, so these questions go to the slow path. Without an Anthropic API key they are refused.
+* **Default tier.** A per-attribute setting in a config file; the starting rule is the entry tier (the lowest amount or balance band). The answer states the tier it used ("for loans up to $100,000").
+* **Other tiers.** The slow path receives all sibling facts, so it can mention others only as labelled alternatives. For a question about one specific product with no amount ("a 30-year mortgage"), it may give the range from the entry tier to the top tier. For a generic question ("mortgage rates"), it leads with the default tier and does not use another tier as the headline.
+* **Validators still apply.** Every number must be a sibling fact on an in-scope key, and a stale or loser value is still rejected.
+
+Status: this is a starting rule, not settled. dup-009 expects two tiers and dup-011 expects one, so the rule above (specific product gives a range, generic question gives the default) is a hypothesis to test against both, not a fitted one. See Reflections, item 5.
 
 #### Failure Handling Matrix
 
@@ -624,7 +652,7 @@ Whether to answer from retrieved text or from resolved facts. Text-only answers 
 2. The `first_seen/last_seen` interval refinement and the `snapshot_recency` tie-break (step 3) are additions to the original proposal; revisit if the eval shows they hurt.
 3. Confidence thresholds calibrated on 40 questions can overfit. Mitigated by synthetic paraphrases and a held-out split.
 4. LLM extraction nondeterminism, mitigated by caching and temperature 0.
-5. Tier policy conflict in the public eval: dup-009 expects both 7.13 and 7.25, dup-011 expects one tier only.
+5. Tier policy against the public eval: dup-009 expects both 7.13 and 7.25, dup-011 expects one tier only. The Tier Policy rule (specific product gives a range, generic question gives the default tier) is a hypothesis that must hold on held-out paraphrases, not only on these two questions.
 6. Questions that mention a past date in text while `as_of=null` are answered as current (by design).
 7. Ingest time depends on the number of fact-bearing prose chunks sent to the LLM; not yet measured. Calls run concurrently, results are cached, and the shipped cache removes the cost at grading time.
 8. The question-shape and qualifier rules and the alias-list construction are the hardest rule-based parts; they get golden tests and are specified in SPEC.md. Their residual risk (a recognised pattern with a bug) is covered only by tests; the fail-closed guards shrink the fast-path share, which must be measured.
