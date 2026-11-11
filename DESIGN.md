@@ -76,7 +76,7 @@ Chunks and facts are not split by path: both paths use both. The real difference
 | Qualifiers and question extraction | Core of the match and of the confidence score | Run first anyway, because the confidence gate decides which path a question takes |
 | Template | Renders the answer text; optional light-model polish, off by default | Not used; the model writes the answer from structured output |
 | Validators | Yes | Yes |
-| LLM | None by default (optional polish and cross-check flags) | Sonnet 5.5, structured output, temperature 0; also all change/history questions, which see the fact-history view |
+| LLM | None by default (optional polish and cross-check flags) | Sonnet 5.5, structured output, temperature 0; also change-cue questions that do not qualify for the fast history template, which see the fact-history view |
 
 Haiku also appears at ingest, to extract facts from prose (cached), and at ingest to verify table row-label parses. That is separate from answer-time use.
 
@@ -406,13 +406,13 @@ sequenceDiagram
 
 #### Change and History Questions
 
-The hidden set includes questions about things that changed between snapshots ("has the 17-month certificate rate changed?", "when did the Hy-Vee branch close?"). They are different from `as_of` questions: the member wants the difference, not the value at one date.
+The hidden set includes questions about things that changed between snapshots ("has the 17-month certificate rate changed?"). They differ from `as_of` questions: the member wants the difference, not the value at one date. `as_of` is still the only source of a target date; the question text is not parsed for dates.
 
-* **Detection.** A rule over the question (change words such as "changed", "still", "used to", "was it ever", "since", "history", "new", "no longer") marks it a change question. `as_of` is still the only source of a target date; the question text is not parsed for dates.
-* **Path.** Always the slow path. The fast path has no history template.
-* **Fact-history view.** For the facts the question matches, the system supplies every distinct value with its validity interval (`first_seen_date` to `last_seen_date`, snapshot ordinals) up to `target_ord`, newest last, plus the pages that introduced or dropped them. The model answers only from that view.
-* **Validators.** Number grounding allows every value in the supplied history. The stale check is relaxed for these questions: an older value is allowed in the text only when the view labels it as an earlier value and the question asks about change. The citation check cites the newest page.
-* **Without an Anthropic API key,** change questions are refused.
+* **Fast path (history template).** A question that fully matches an anchored history pattern ("has / did the {entity} {measure} change", "what was the {entity} {measure} before") is answered from stored fact intervals. For the one matching fact key, the system builds the value at each snapshot up to `target_ord` (using the conflict winner at that snapshot), groups consecutive equal values into segments, and renders the `history` template: "Yes - the 17-month certificate APY was 3.50% as of 2026-06-09 and had changed to 3.90% by 2026-08-27", or "No - ... has been 3.50% in every snapshot from 2026-05-12 to 2026-09-28". Snapshot dates only bound the change (it happened after one snapshot and no later than the next), so the wording says "as of" and "by", never an exact date.
+* **Fast path only when the history is trustworthy.** The key must be present in every snapshot from its first appearance to `target_ord` (a gap could be an extraction miss, not a real change), no snapshot may have an unresolved conflict for it, its `(entity, attribute)` must not be degraded by the snapshot diff, and there must be at most 5 segments. Otherwise the question goes to the slow path.
+* **Slow path (fallback).** A question with a change cue ("still", "used to", "since", "no longer") that does not match a history pattern goes to the slow path with a fact-history view: every distinct value with its validity interval up to `target_ord`, oldest first, plus pages added or removed. A status question such as "Is the Hy-Vee branch still open?" is not a history question; it uses the status template.
+* **Validators.** Number grounding allows every segment value and the printed snapshot dates. The stale-value check is relaxed only for history answers, where earlier values are the point.
+* **Without an Anthropic API key,** history questions that qualify for the fast path are still answered; the rest are refused.
 
 #### Tier Policy
 
@@ -515,6 +515,7 @@ Templates are generic per attribute type, not per fact. The slots carry everythi
 | status | `{Yes/No} - {entity} {status_phrase} {date}.` | "No - the Hy-Vee branch was scheduled to close March 31, 2026." |
 | list | `{intro}:` then one `- {item}` per line, each item rendered with the rate or fee template | "Credit cards:" then a line per card with its APR |
 | quoted prose | `{entity}: "{sentence}"` | "Membership: "People who live or work in…"" |
+| history | `Yes/No - the {entity} {attribute} for {qualifiers} was {v1} as of {d1} and had changed to {v2} by {d2}.` (or `has been {v} in every snapshot from {d1} to {d2}`) | "Yes - the 17-month certificate APY was 3.50% as of 2026-06-09 and had changed to 3.90% by 2026-08-27." |
 | refusal | `I couldn't find {the question's own phrase} on Dupaco's website. Please contact Dupaco.` | no digits, no sources |
 
 When the question does not say whether it wants the rate or the APR, the rate template shows both from the same row ("7.13% rate / 7.27% APR"). When it does, it shows only the one asked about.

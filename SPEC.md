@@ -20,7 +20,7 @@ Decisions confirmed with the product owner while drafting this spec:
 |---|---|---|
 | D1 | Answer-cache key is the exact canonical key built by question extraction (shape, entity, sorted qualifiers, `target_ord`). No embedding-similarity cache. Only fully understood questions are cached. | Section 11 |
 | D2 | The embedding weights are bundled in the submission folder. | Sections 2, 6.8 |
-| D3 | Change and history questions are answered by the slow path using a fact-history view. | Sections 8.6, 13.3 |
+| D3 | Change and history questions that match an anchored history pattern are answered on the fast path by a `history` template built from stored fact intervals. Other change-cue questions go to the slow path with a fact-history view. | Sections 8.6, 9.4, 12.5, 13.3 |
 | D4 | One chunk row per unique chunk with a validity interval, and `snapshot_recency` as a third conflict tie-break, are approved. | Sections 5, 6.4, 10 |
 | D5 | An Anthropic API key exists at development time and is **not** assumed at grading. The extraction cache is generated at development time and shipped. Without a key, slow-path questions are refused and `NOTES.md` says so. | Sections 6.7, 13, 14 |
 | D6 | `conflicts()` scans all snapshots, de-duplicated by topic and value set. | Section 10 |
@@ -398,7 +398,7 @@ The normaliser MUST have a golden test per row above, property tests (parsing th
 
 ### 8.2 Parsed question
 
-`parse(question)` produces a `ParsedQuestion` with: normalised text; `shape`; `entity` candidates; `measure`; `qualifiers` with their source spans; `change` flag; `consumed` spans; `residual` text; `uncertain` flag with reasons; `canonical_key` (or none). The function MUST be deterministic and MUST NOT call a model.
+`parse(question)` produces a `ParsedQuestion` with: normalised text; `shape`; `entity` candidates; `measure`; `qualifiers` with their source spans; `change_cue` flag; `consumed` spans; `residual` text; `uncertain` flag with reasons; `canonical_key` (or none). The function MUST be deterministic and MUST NOT call a model.
 
 ### 8.3 Shape classifier
 
@@ -406,7 +406,7 @@ Ordered rules over the lower-cased question; first match wins.
 
 | Order | Shape | Trigger |
 |---|---|---|
-| 1 | `change` | change words (section 8.6) |
+| 1 | `history` | an anchored history pattern matches (section 8.6) |
 | 2 | `count` | starts with `how many`, or `number of` |
 | 3 | `yes_no` | starts with `is`, `are`, `does`, `do`, `can`, `was`, `were`, `will`, `has`, `have` |
 | 4 | `date` | starts with `when` |
@@ -430,16 +430,17 @@ Ordered rules over the lower-cased question; first match wins.
 * **COV-4** Any other word or any number left in the residual makes the parse *not fully covered* (reason `residual:<token>`). This includes unrecognised modifiers (`about`, `roughly`, `around`, `approximately`), unrecognised years, and "half" in "a year and a half".
 * **COV-5** A parse that is not fully covered, is `uncertain`, or whose shape is `other`, MUST NOT use the fast path, MUST NOT be cached, and MUST NOT have a `canonical_key`.
 
-### 8.6 Change and history detection
+### 8.6 Change and history questions
 
-* **CHG-1** A question is a change question if the normalised text contains any of: `changed`, `change`, `changes`, `still`, `used to`, `no longer`, `any longer`, `anymore`, `since`, `history`, `previously`, `before`, `earlier`, `ever`, `new`, `increase`, `decrease`, `went up`, `went down`, `closed`, `closing`, `open again`. **Spec decision:** a deliberately broad list; a false positive only sends the question to the slow path, which is safe.
-* **CHG-2** A change question always takes the slow path with the fact-history view (section 13.3).
-* **CHG-3** The question text is not parsed for dates. The target date still comes only from `as_of`.
+* **CHG-1** A question has a **change cue** if the normalised text contains any of: `changed`, `change`, `changes`, `still`, `used to`, `no longer`, `any longer`, `anymore`, `since`, `history`, `previously`, `before`, `earlier`, `ever`, `new`, `increase`, `decrease`, `went up`, `went down`, `gone up`, `gone down`, `closed`, `closing`, `open again`. **Spec decision:** a deliberately broad list. A cue alone never selects the fast path.
+* **CHG-2** The shape is `history` only when the question fully matches an anchored **history pattern**: `H1` = `(has|have|did) [the] <entity> [qualifiers] [measure] (change|changed|increase|increased|decrease|decreased|go up|gone up|go down|gone down)`; `H2` = `(what|which) (was|were) [the] [measure] [qualifiers] <entity> (before|previously|earlier)`. The cue words in a matched pattern are consumed spans, so the coverage check (section 8.5) can pass.
+* **CHG-3** A question with a change cue that does **not** match a history pattern takes the slow path with the fact-history view (section 13.3). A status question such as `Is the Hy-Vee branch still open?` matches the `STATUS` pattern (which consumes `still`) and is answered by the `status` template, not as a history question.
+* **CHG-4** The question text is not parsed for dates. The target date still comes only from `as_of`. A question that carries a date in its text with `as_of=null` is not fully covered (the date words are residual) and therefore goes to the slow path.
 
 ### 8.7 Fast-path grammar
 
 * **GR-1** The fast path accepts a question only if it matches one pattern in the registry (`kk/query/grammar.py`). A pattern is an anchored description over the extracted slots, for example: `<wh-word> [be] [the] [measure] [for|on|of] [a|an|the] [qualifiers] <entity>`.
-* **GR-2** Initial pattern families, one per template type: `VALUE` (rate, APY, APR, minimums), `FEE`, `COUNT`, `ADDRESS`, `HOURS`, `STATUS` (yes/no and `when`), `LIST` (single table), `PROSE`. About ten patterns in total.
+* **GR-2** Initial pattern families, one per template type: `VALUE` (rate, APY, APR, minimums), `FEE`, `COUNT`, `ADDRESS`, `HOURS`, `STATUS` (yes/no and `when`), `LIST` (single table), `PROSE`, `HISTORY` (`H1`, `H2`, section 8.6). About twelve patterns in total.
 * **GR-3** Patterns are written from question **shapes**, not from individual public questions. The public questions are used only afterwards to report which share of them each pattern covers.
 * **GR-4** Each pattern has at least 5 positive and 5 negative golden cases, including near-misses that must not match.
 * **GR-5** A partial match is a non-match.
@@ -473,6 +474,15 @@ A parse that passes COV-5 has `canonical_key = (shape, entity, measure, sorted q
 * **SIB-4** An amount within 0.5% of a tier cap on either side, or equal to a cap with a strict modifier, makes the selection ambiguous (**none**).
 * **SIB-5** A selection of **none** or **several** where the question's own qualifiers do not resolve it caps confidence (section 12.1) and the question goes to the slow path, which applies the tier policy (section 13.4).
 * **SIB-6** A fact whose qualifier contradicts one the question stated (for example the question says 60 months and the fact says 36 months) is removed from the candidates before scoring.
+
+### 9.4 History segments (fast-path history)
+
+For a `history` question with a unique entity link, a unique measure and a unique sibling selection, the fact key `K` is fixed. The system builds the history of `K` for ordinals `1..target_ord`:
+
+* **HSEG-1** At each ordinal `i`, the value is the winner of the fact key after conflict resolution at that ordinal (section 10.3), or *absent* when the key has no visible fact at `i`.
+* **HSEG-2** Consecutive ordinals with the same value form a **segment** with `first_date` (the `taken_on` of its first snapshot) and `last_date` (the `taken_on` of its last snapshot). The history is the list of segments, oldest first. Leading absent ordinals (before the key existed) are not part of the history.
+* **HSEG-3** The fast path is allowed only if: the key is present at every ordinal from its first appearance to `target_ord` (no gap); no ordinal has an unresolved conflict for `K`; `(entity, attribute)` is not `degraded` (TBL-11); and there are at most 5 segments. Otherwise the hard cap in section 12.1 applies and the question goes to the slow path.
+* **HSEG-4** Snapshot dates are the only dates the answer can give. They bound the change (it happened after the last snapshot with the old value and no later than the first snapshot with the new one), so the wording uses "as of" and "by", never "on".
 
 ## 10. Conflicts
 
@@ -555,7 +565,8 @@ Applied in order. The first strategy that picks a unique winner decides.
 5. The sibling selection is **none** or **several** (SIB-5).
 6. The winning fact has `entity_inferred = true` and the entity link is not a unique label match.
 7. The winning fact's `(entity, attribute)` is `degraded` (TBL-11).
-8. The question is a change question (CHG-2).
+8. The question has a change cue but its shape is not `history` (CHG-3).
+9. The shape is `history` and the history fails HSEG-3 (a gap, an unresolved conflict, a degraded pair, or more than 5 segments).
 
 ### 12.2 Routing
 
@@ -598,6 +609,7 @@ Hand-written, versioned in code, unit-tested, chosen by (attribute type, shape) 
 | `status` | `yes_no`, `date` with `status` | `{Yes or No} - {entity_label} {status_phrase} {date}.` |
 | `list` | `list` over one table | `{intro}:` then one `- {item}` line per row, items rendered with `rate` or `fee`, in table order |
 | `quoted_prose` | `prose` | `{entity_label}: "{sentence}"` |
+| `history` | `history` | Changed (2 segments): `Yes - the {entity_label} {attribute_label} for {qualifier_phrase} was {v1} as of {d1_last} and had changed to {v2} by {d2_first}.` Three or more segments: `Yes - the {entity_label} {attribute_label} for {qualifier_phrase} has changed {n} times:` then one line `- {v} from {first_date} to {last_date}` per segment. Unchanged: `No - the {entity_label} {attribute_label} for {qualifier_phrase} has been {v} in every snapshot from {first_date} to {last_date}.` For `H2` the same text is used. |
 | `refusal` | section 12.3 | |
 
 * **TPL-1** `{qualifier_phrase}` is built by a fixed map in a fixed key order (`term` to "a 60-month term", `amount_tier` to "loans of $100,000 or less", `model_year` to "2024-27 model years").
@@ -606,6 +618,7 @@ Hand-written, versioned in code, unit-tested, chosen by (attribute type, shape) 
 * **TPL-4** A template is rendered only when every slot has a value; otherwise there is no template (hard cap 2).
 * **TPL-5** Polish (`flags.polish`, default off) sends only the rendered text to the light model, with a 1.5 s timeout. The result is discarded unless its set of numbers equals the template's. On timeout, error or mismatch, the template text is returned unchanged.
 * **TPL-6** The same facts MUST give the same text.
+* **TPL-7** The `history` template prints snapshot dates in ISO format (`2026-05-19`) and nothing else about timing. It never states an exact change date. Sources are the page of the newest segment and the page of the oldest segment.
 
 ### 12.6 Sources
 
@@ -615,7 +628,7 @@ The fast path cites the chunk (and its page) of the winning fact. The slow path 
 
 ### 13.1 Inputs
 
-The slow path receives: the question (original text); the target snapshot date; the resolved facts for the candidate fact keys (value, qualifiers, effective and expiry dates, authority, snapshot id); the matched parent chunks (tables with header and footer notes), capped at 12000 characters in total, ordered by candidate score; conflict notes for in-scope keys; for change questions, the fact-history view (13.3); and, for tier-ambiguous questions, all sibling facts (13.4).
+The slow path receives: the question (original text); the target snapshot date; the resolved facts for the candidate fact keys (value, qualifiers, effective and expiry dates, authority, snapshot id); the matched parent chunks (tables with header and footer notes), capped at 12000 characters in total, ordered by candidate score; conflict notes for in-scope keys; for change-cue questions that do not take the fast history template, the fact-history view (13.3); and, for tier-ambiguous questions, all sibling facts (13.4).
 
 ### 13.2 Call and output
 
@@ -626,7 +639,9 @@ The slow path receives: the question (original text); the target snapshot date; 
 * **SLOW-5** With no key, the slow path is not called and the result is the safe refusal (a single warning is logged per run).
 * **SLOW-6** The model never sees the other snapshots' values except in the fact-history view (13.3), and then labelled with their dates.
 
-### 13.3 Fact-history view
+### 13.3 Fact-history view (slow-path fallback for change cues)
+
+Used when a question has a change cue but is not a `history` shape (CHG-3), or when a `history` question fails HSEG-3.
 
 * **HIST-1** For the facts matched by the question, the view lists every distinct `value_text` with `first_seen_date`, `last_seen_date`, and the page URL, for ordinals up to `target_ord`, oldest first.
 * **HIST-2** A value that appears in no snapshot at or below `target_ord` MUST NOT appear in the view.
@@ -648,7 +663,7 @@ Run on every answer from both paths, in this order. A failure on the fast path e
 
 | ID | Check | Rule |
 |---|---|---|
-| V1 | Number grounding | Extract numbers from `text` using the scorer's own number extraction (value and unit). Every number MUST be in the allowed set: the winning fact value(s); qualifier numbers on the winning keys (tier amounts, terms, model years); numbers in the question; for change questions, the values in the history view labelled as earlier |
+| V1 | Number grounding | Extract numbers from `text` using the scorer's own number extraction (value and unit). Every number MUST be in the allowed set: the winning fact value(s); qualifier numbers on the winning keys (tier amounts, terms, model years); numbers in the question; the numbers in the dates a template prints (ISO date parts of the snapshot or fact date); for `history` answers, every segment value of the key |
 | V2 | Stale and loser | If `text` contains a number that is a known loser or expired value for an in-scope key and is not a winner for any in-scope key, reject. Known losers come from the conflicts table, earlier snapshots and expired chunks |
 | V3 | Refusal shape | A refusal has `confident=False`, no digit that is not in the question, and no sources |
 | V4 | Citation | Every cited URL belongs to the winning evidence (fast path) or to retrieved evidence (slow path) |
@@ -745,6 +760,7 @@ Each criterion is checked by a named test or report.
 | AC-10 | No answer text contains a value the conflicts table marks as a loser for an in-scope key (V2 holds on every public question). |
 | AC-11 | `make verify` passes locally and in Docker. |
 | AC-12 | Deleting the shipped extraction cache and re-running ingest with a key reproduces the same facts (compared by fact key and value). |
+| AC-13 | Every `history` golden case (changed once, changed several times, unchanged, gap in the history, unresolved conflict at some ordinal) renders the expected text or escalates to the slow path as specified, and no history answer states an exact change date. |
 
 ## 21. Spec decisions for review
 
@@ -758,7 +774,7 @@ These were chosen while writing the spec because `DESIGN.md` did not settle them
 6. **Slow-path deadline.** 15 s total with at most one retry, below the 20 s point where the speed score reaches zero.
 7. **Recognised amount modifiers.** The list in 7.3; anything else fails the coverage check.
 8. **Neutral-word list.** The list in COV-3, to be reviewed after the first calibration run.
-9. **Change-word list.** The broad list in CHG-1, with false positives going to the slow path.
+9. **Change-cue list.** The broad list in CHG-1; a cue alone sends the question to the slow path, never to the fast path.
 10. **Conflict rebuild.** Rebuilt after every `ingest` rather than once at the end.
 11. **Chunk parent cap.** `chunk.max_tokens = 1200`.
 12. **Authority rules.** The URL-and-title table in 6.6 is provisional until a URL survey of the real snapshots.
@@ -766,6 +782,8 @@ These were chosen while writing the spec because `DESIGN.md` did not settle them
 14. **History-view size.** 40 lines, 12000 characters of context for the slow path.
 15. **Hard-cap rule.** A cap lowers `c` to at most `tau_accept - 0.01`, so the question cannot take the fast path. It still goes to the slow path unless its capped score is also below `tau_floor`, in which case it is refused.
 16. **Same-URL duplicates.** Two different values for one fact key on one page are not a conflict (quarantined by P6).
+17. **History wording and limits.** `history` answers bound the change by snapshot dates ("as of", "by"), allow at most 5 segments, and require a gap-free history; anything else goes to the slow path.
+18. **History patterns.** Only `H1` and `H2` select the fast history template; the broad cue list in CHG-1 never does by itself.
 
 ## 22. Deferred to the implementation plan
 
