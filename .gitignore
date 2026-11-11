@@ -12,3 +12,7 @@ snapshots_zip/
 *.lance/
 models/
 .venv/
+
+# derived from the website data (not redistributable): shipped extraction cache and embedding weights
+submission/cache/
+submission/models/
