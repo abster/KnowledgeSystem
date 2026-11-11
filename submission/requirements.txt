@@ -32,6 +32,10 @@ jiter==0.18.0 ; python_full_version < '3.11'
     # via anthropic
 jiter==0.19.0 ; python_full_version >= '3.11'
     # via anthropic
+markdown-it-py==4.3.0
+    # via kk-submission
+mdurl==0.1.2
+    # via markdown-it-py
 opentelemetry-api==1.45.2
     # via anthropic
 pydantic==2.14.3

@@ -1294,6 +1294,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
+    { name = "markdown-it-py" },
     { name = "pydantic" },
 ]
 
@@ -1315,6 +1316,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=0.40" },
+    { name = "markdown-it-py", specifier = ">=3.0" },
     { name = "pydantic", specifier = ">=2.7" },
 ]
 
