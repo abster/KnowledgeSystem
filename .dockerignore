@@ -1,0 +1,14 @@
+.git
+.venv
+.env
+results
+snapshots
+snapshots_zip
+dist
+**/__pycache__
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.hypothesis
+submission/models
+submission/cache

@@ -1,0 +1,31 @@
+{
+  "provenance": {
+    "retrieval": {"set_by": "SPEC 3 initial value", "dataset": "none (not calibrated)"},
+    "confidence": {
+      "set_by": "SPEC 3 placeholder from DESIGN worked examples",
+      "dataset": "none; replaced by the calibration procedure (SPEC 12.4, Step 9)"
+    },
+    "tier": {"set_by": "SPEC 3 initial value", "dataset": "none (hypothesis, SPEC decision 13)"},
+    "llm": {"set_by": "SPEC 3 initial value", "dataset": "none"},
+    "flags": {"set_by": "SPEC 3 initial value", "dataset": "none"},
+    "chunk": {"set_by": "SPEC decision 11", "dataset": "none"},
+    "cache": {"set_by": "SPEC 3 initial value", "dataset": "none"}
+  },
+  "retrieval": {"top_k": 20, "per_index_k": 40, "rrf_k": 60},
+  "confidence": {
+    "weights": {"similarity": 0.30, "margin": 0.20, "qualifier": 0.30, "entity": 0.20},
+    "tau_floor": 0.30,
+    "tau_accept": 0.80,
+    "resolution_state": {"unique": 1.0, "strategy_1_2": 0.9, "strategy_3": 0.7, "unresolved": 0.0}
+  },
+  "tier": {"default_by_attribute": {"*": "entry"}},
+  "llm": {
+    "slow_model": "claude-sonnet-5-5",
+    "extract_model": "claude-haiku-5-5",
+    "slow_deadline_s": 15,
+    "extract_concurrency": 8
+  },
+  "flags": {"polish": false, "llm_crosscheck": false, "ingest_llm_verify": true},
+  "chunk": {"max_tokens": 1200},
+  "cache": {"max_entries": 10000}
+}

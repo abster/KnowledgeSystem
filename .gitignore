@@ -16,3 +16,13 @@ models/
 # derived from the website data (not redistributable): shipped extraction cache and embedding weights
 submission/cache/
 submission/models/
+
+# build and tool output
+dist/
+*.egg-info/
+build/
+.coverage
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/

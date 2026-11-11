@@ -1,0 +1,18 @@
+# Toolchain services only. There is no database service: LanceDB is embedded.
+x-toolchain: &toolchain
+  build: .
+  working_dir: /work
+  volumes:
+    - .:/work
+  env_file:
+    - path: .env
+      required: false
+
+services:
+  verify:
+    <<: *toolchain
+    command: make verify
+
+  eval:
+    <<: *toolchain
+    command: make eval RUN=docker

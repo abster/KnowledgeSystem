@@ -24,10 +24,12 @@ Read this first in every session. `SPEC.md` says what to build, `DESIGN.md` says
 * `harness/`, `eval/`, `snapshots/` are provided and read-only. `starter/` is the reference baseline.
 * `results/` holds saved eval runs (git-ignored).
 
-## Commands (the Makefile arrives in Step 2)
+## Commands (Makefile)
 
 * `make verify`: lint, format check, types, security scan, tests with coverage, package build, eval gate.
 * `make eval`, `make eval-selftest`, `make check-key`, `make export-requirements`.
+* The eval gate compares against `tests/eval_baseline.json` (metrics only). Update it only in a step
+  that changes accuracy, and only after approval.
 * Eval A: `python harness/run_eval.py --submission submission --eval eval/public_eval.jsonl --out results/<run>`
 * Eval S: same with `--snapshots harness/selftest/snapshots --eval harness/selftest/eval.jsonl --conflicts-gold harness/selftest/conflicts_gold.json`
 * `--judge` is not part of the gate.

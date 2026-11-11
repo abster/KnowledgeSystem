@@ -1,0 +1,50 @@
+{
+  "_note": "Refuse-all stub (Step 2). Metrics only, no snapshot text. Update deliberately in a step that changes accuracy.",
+  "by_category": {
+    "branch_info": {
+      "n": 6,
+      "score": 0.0
+    },
+    "conflict_resolution": {
+      "n": 3,
+      "score": 0.0
+    },
+    "current_value": {
+      "n": 3,
+      "score": 0.0
+    },
+    "entity_attribution": {
+      "n": 4,
+      "score": 0.0
+    },
+    "list_completeness": {
+      "n": 4,
+      "score": 0.0
+    },
+    "should_refuse": {
+      "n": 3,
+      "score": 1.0
+    },
+    "stale_trap": {
+      "n": 7,
+      "score": 0.0
+    },
+    "temporal_as_of": {
+      "n": 4,
+      "score": 0.0
+    },
+    "tier_disambiguation": {
+      "n": 6,
+      "score": 0.0
+    }
+  },
+  "consistency": {
+    "score": 1.0
+  },
+  "errors": 0,
+  "qa_score": 0.093,
+  "speed": {
+    "p95_s": 0.0
+  },
+  "stale_trap_hits": 0
+}
