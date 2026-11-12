@@ -220,7 +220,7 @@ Rebuilt in full at the end of each `ingest`. Fields: `conflict_id`, `topic`, `fa
   * `effective (as of|on|date:)? <date>`, `rates? (are )?(effective )?as of <date>`, `as of <date>`
   * `valid (through|until) <date>`, `offer (ends|expires|ended) <date>`, `expires? <date>`, `through <date>`, `ended <date>` (these set `expiry_date`)
 * **META-3** If several dates match, the one closest after the matched cue word wins; ties go to the later date. If none match, both dates are null.
-* **META-4** A chunk is *expired at ordinal k* if `expiry_date` is not null and earlier than the `taken_on` of snapshot `k`.
+* **META-4** A chunk is *expired at ordinal k* if `expiry_date` is not null and on or before the `taken_on` of snapshot `k`. A chunk is *not yet in force at ordinal k* if `effective_date` is not null and later than that `taken_on`. The `taken_on` of the ordinal is the only reference date (it stands for `as_of`, which selects the snapshot); the wall clock is never used.
 
 ### 6.6 Source class and authority
 
@@ -470,9 +470,12 @@ A parse that passes COV-5 has `canonical_key = (shape, entity, measure, sorted q
 
 * **SIB-1** *Siblings* are candidates with the same entity and attribute that differ only in one qualifier key (the *varying key*, for example `amount_tier`).
 * **SIB-2** The question *selects* exactly one sibling when its qualifier for the varying key matches exactly one sibling under the rules below. Otherwise the selection is **none** or **several**.
-* **SIB-3** *Tier selection.* Siblings with cap tiers are ordered by cap. A point amount `A` selects the smallest tier whose cap is `>= A`. An upper bound ("under $X", "up to $X") selects the smallest tier whose cap is `>= X` only when `X` equals a tier cap exactly; otherwise it selects none. A lower bound ("over $X", "at least $X") selects the smallest tier whose cap is `> X` (strict) or `>= X` (inclusive), and the selection is *several* when `X` is below the top tier, since larger amounts fall in higher tiers.
-* **SIB-4** An amount within 0.5% of a tier cap on either side, or equal to a cap with a strict modifier, makes the selection ambiguous (**none**).
-* **SIB-5** A selection of **none** or **several** where the question's own qualifiers do not resolve it caps confidence (section 12.1) and the question goes to the slow path, which applies the tier policy (section 13.4).
+* **SIB-3** *Tier selection.* The question's amount constraint (section 7.3) is a region of amounts. A sibling tier is *touched* if it holds at least one amount in the region: a cap tier covers the amounts above the next-lower tier's cap up to its own cap, a band covers its range, and a floor tier covers the amounts above its bound. The selection is:
+  * **one** if the constraint equals a tier's own constraint exactly (same kind, bound and inclusivity, for example "up to $300,000" for a "$300,000 or less" row), or if exactly one tier is touched and the whole region lies inside it ("at most $50,000" when the lowest tier is "$100,000 or less");
+  * **several** if two or more tiers are touched ("$150,000 or less"), or one tier is touched but the region extends beyond it ("over $250,000" when the top tier is a cap, since larger amounts are in no published tier), or SIB-4 applies;
+  * **none** if no tier is touched ("$400,000" when the top cap is $300,000).
+* **SIB-4** *Boundary.* An endpoint of the region within 0.5% of a cap tier's cap, on either side but not exactly on it ("$100,300" against a $100,000 cap), or an upper bound with a strict modifier exactly at a cap ("under $100,000"), makes the selection **several**, the tier that owns the cap and the next tier. The 0.5% band applies to cap tiers only, not to bands, whose edges are stated to the cent.
+* **SIB-5** A selection of **several**, including a boundary case, where the question's own qualifiers do not resolve it caps confidence (section 12.1) and the question goes to the slow path, which applies the tier policy (section 13.4). A selection of **none** is not capped: no published tier or sibling matches, and a fully covered question is answered on the fast path with the safe refusal (section 12.2).
 * **SIB-6** A fact whose qualifier contradicts one the question stated (for example the question says 60 months and the fact says 36 months) is removed from the candidates before scoring.
 
 ### 9.4 History segments (fast-path history)
@@ -481,7 +484,7 @@ For a `history` question with a unique entity link, a unique measure and a uniqu
 
 * **HSEG-1** At each ordinal `i`, the value is the winner of the fact key after conflict resolution at that ordinal (section 10.3), or *absent* when the key has no visible fact at `i`.
 * **HSEG-2** Consecutive ordinals with the same value form a **segment** with `first_date` (the `taken_on` of its first snapshot) and `last_date` (the `taken_on` of its last snapshot). The history is the list of segments, oldest first. Leading absent ordinals (before the key existed) are not part of the history.
-* **HSEG-3** The fast path is allowed only if: the key is present at every ordinal from its first appearance to `target_ord` (no gap); no ordinal has an unresolved conflict for `K`; `(entity, attribute)` is not `degraded` (TBL-11); and there are at most 5 segments. Otherwise the hard cap in section 12.1 applies and the question goes to the slow path.
+* **HSEG-3** The fast path is allowed only if: the key is present at every ordinal from its first appearance to `target_ord` (no gap); no ordinal has an unresolved conflict for `K`; no winning fact is a `none_value` (an explicit "none" or dash is not turned into wording by a rule; the slow path judges it); `(entity, attribute)` is not `degraded` (TBL-11); and there are at most 5 segments. Otherwise the hard cap in section 12.1 applies and the question goes to the slow path.
 * **HSEG-4** Snapshot dates are the only dates the answer can give. They bound the change (it happened after the last snapshot with the old value and no later than the first snapshot with the new one), so the wording uses "as of" and "by", never "on".
 
 ## 10. Conflicts
@@ -502,17 +505,19 @@ Facts with `entity_inferred = true` or from a quarantined table do not take part
 
 ### 10.3 Resolution
 
-Applied in order. The first strategy that picks a unique winner decides.
+The reference date `D` is the `taken_on` of the ordinal being resolved (META-4). A value is *current* if at least one chunk carrying it is neither expired nor not yet in force. Applied in order; the first step that picks a unique winner decides.
 
-| Strategy | Applies when | Winner |
+| Step | Applies when | Result |
 |---|---|---|
-| 1. `effective_date` | (a) exactly one competing value is on a chunk expired at that ordinal; or (b) every competing value has an `effective_date` and they differ | (a) the non-expired value; (b) the latest `effective_date` |
-| 2. `source_authority` | strategy 1 does not apply, and `authority_rank` differs | highest rank. If ranks tie and `origin` differs, `table_rule` beats `prose_llm` |
-| 3. `snapshot_recency` | strategies 1-2 do not apply | the value whose page has the newest `fetched_at`; if equal, the highest `first_seen_ord` |
-| 4. unresolved | none applies | no winner |
+| 0. current values | always | Values with no current chunk are removed: an expired value always loses, and a value whose effective date is after `D` always loses. If **no** value is current, the candidate is unresolved (nothing current can be called right). If exactly **one** value is current, it wins, with strategy `effective_date`. |
+| 1. `effective_date` | two or more current values, every one has an `effective_date`, and the dates differ | the latest `effective_date` wins. If two or more share the latest date, only those continue to step 2. If any current value has no effective date, this step is skipped and all current values continue. |
+| 2. `source_authority` | two or more values remain | the highest `authority_rank`. If several share it and `origin` differs, `table_rule` beats `prose_llm`. If one value remains it wins; otherwise the values that share the top rank continue to step 3. |
+| 3. `snapshot_recency` | two or more values remain | the value whose page has the newest `fetched_at`; if equal, the highest `first_seen_ord` |
+| 4. unresolved | step 3 also ties | no winner |
 
-* **CR-1** If two or more values share the winning rank, or strategy 3 also ties, the candidate is unresolved.
-* **CR-2** Strategy 3 is weaker evidence than 1 and 2 and the reason text says so.
+* **CR-1** A shared top rank is not by itself unresolved: those values go on to step 3. The candidate is unresolved only when step 0 leaves no current value or step 3 ties.
+* **CR-2** Step 3 is weaker evidence than steps 0 to 2 and the reason text says so.
+* **CR-3** A value carried by several pages is represented by its best current page: highest `authority_rank`, then later `effective_date`, then newer `fetched_at`, then lower URL. A value is current if any of its pages is.
 
 ### 10.4 Output record
 
@@ -522,7 +527,7 @@ Applied in order. The first strategy that picks a unique winner decides.
 | `values` | The competing values as displayed in the sources (`2.95%`, `3.50%`), de-duplicated, sorted ascending by numeric value |
 | `sources` | One `Source` per value: the URL, `snapshot_id` and quote of the highest-authority page that carries it, in the same order as `values` |
 | `resolution` | The displayed winning value, or `None` |
-| `reason` | `strategy=<name>: <winner> <evidence>; <loser> <evidence>`, for example `strategy=effective_date: 3.50% effective 2026-09-25 beats 2.95% from an expired promo page` |
+| `reason` | `strategy=<name>: <winner> supersedes <loser>; <loser>`. Every value is described the same way, winner first: `<value> (<effective date or "no effective date">, <"live", "expired <date>" or "not yet in force">, [<evidence>,] "<page title>")`. The evidence is `<source_class> rank <n>, <origin>` for `source_authority` and `fetched <date>` for `snapshot_recency`. Titles are cut at 60 characters, at most 3 losers are named (the rest become `and N more`), the winner is always complete, and `snapshot_recency` is written `snapshot_recency (weaker evidence)`. Unresolved: `strategy=unresolved: <values> cannot be separated by effective date, source authority or snapshot recency`, or `strategy=unresolved: every competing value is expired: <values>`. Example: `strategy=effective_date: 3.50% (no effective date, live, "Certificates") supersedes 2.95% (no effective date, expired 2025-09-30, "Promo")` |
 
 ### 10.5 Answer interaction
 
@@ -562,17 +567,18 @@ Applied in order. The first strategy that picks a unique winner decides.
 2. There is no template for the (shape, attribute type) pair.
 3. The conflict is unresolved.
 4. The question is an aggregate (sum, total, average, compare) or asks for a list whose items come from more than one page or section.
-5. The sibling selection is **none** or **several** (SIB-5).
+5. The sibling selection is **several**, including a boundary case (SIB-5).
 6. The winning fact has `entity_inferred = true` and the entity link is not a unique label match.
 7. The winning fact's `(entity, attribute)` is `degraded` (TBL-11).
 8. The question has a change cue but its shape is not `history` (CHG-3).
-9. The shape is `history` and the history fails HSEG-3 (a gap, an unresolved conflict, a degraded pair, or more than 5 segments).
+9. The shape is `history` and the history fails HSEG-3 (a gap, an unresolved conflict, a none value, a degraded pair, or more than 5 segments).
 
 ### 12.2 Routing
 
 | Condition | Route |
 |---|---|
 | No snapshot at `as_of`, or `as_of` invalid | Safe refusal |
+| Parse fully covered and grammar matched, but the sibling selection is **none** (SIB-5) | Safe refusal, no model call |
 | `c < tau_floor` (after caps) | Safe refusal, no model call |
 | `tau_floor <= c < tau_accept` (after caps) | Slow path |
 | `c >= tau_accept` | Fast path |
@@ -650,7 +656,7 @@ Used when a question has a change cue but is not a `history` shape (CHG-3), or w
 
 ### 13.4 Tier policy
 
-* **TIER-1** Applies when the question omits a qualifier and the sibling selection is **none** or **several** (SIB-5). It is applied only by the slow path.
+* **TIER-1** Applies when the question omits a qualifier or the sibling selection is **several** (SIB-5). It is applied only by the slow path.
 * **TIER-2** The default tier for an attribute comes from `tier.default_by_attribute`. The initial rule is the **entry tier** (the lowest cap or band).
 * **TIER-3** The slow path states the tier it used (for example "for loans up to $100,000").
 * **TIER-4** For a question about one specific product with no amount ("a 30-year mortgage"), the answer MAY give the range from the entry tier to the top tier. For a generic question ("mortgage rates"), it leads with the default tier and does not use another tier as the headline.
@@ -785,6 +791,10 @@ These were chosen while writing the spec because `DESIGN.md` did not settle them
 16. **Same-URL duplicates.** Two different values for one fact key on one page are not a conflict (quarantined by P6).
 17. **History wording and limits.** `history` answers bound the change by snapshot dates ("as of", "by"), allow at most 5 segments, and require a gap-free history; anything else goes to the slow path.
 18. **History patterns.** Only `H1` and `H2` select the fast history template; the broad cue list in CHG-1 never does by itself.
+19. **Nothing current means unresolved.** If every competing value is expired or not yet in force, the conflict is unresolved (10.3 step 0). Ranking withdrawn values against each other could present one as current.
+20. **Resolution order.** Expired (on or before `D`) and not-yet-in-force values lose first; the latest effective date decides next, and only among dated values; authority and then recency apply only to what remains; a shared top rank goes to recency instead of being unresolved. `D` is the snapshot's `taken_on`. (Changes 10.3, CR-1 and META-4.)
+21. **Tier selection errs on precision.** A certain match with exactly one tier is answered on the fast path; a boundary or a match with several tiers goes to the slow path; no match is a fast-path refusal. (Changes SIB-3 to SIB-5, 12.1 cap 5, 12.2 and TIER-1.)
+22. **None values in history.** A history whose winning fact is a none value is untrusted and goes to the slow path; no rule words it (HSEG-3).
 
 ## 22. Deferred to the implementation plan
 

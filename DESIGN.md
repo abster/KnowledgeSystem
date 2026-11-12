@@ -232,7 +232,7 @@ Ingest and answer share **one normaliser**, so "60-month" in a question and "60 
 
 1. **Full-coverage check.** Each rule records the span of question text it consumed. After extraction, whatever remains must consist only of neutral words from a short allowlist ("what", "is", "the", "for", "a", "loan", "rate" and similar) and the entity tokens. Any other word or number sends the question to the slow path. This catches modifiers such as "over", "between", "at least", unparsed words such as the "half" in "a year and a half", and stray years such as "2022", including ones nobody anticipated, because an unknown word fails by default.
 2. **Closed fast-path grammar.** The fast path handles only questions that fully match one of about 10 anchored patterns, for example `what is the {measure} for a {term} {product}` or `how many {entity}`. Each pattern has golden tests. A partial match is a non-match. The accepted questions are a short tested list, not an open-ended rule set.
-3. **Sibling selection check.** When sibling facts differ only in a qualifier (the $100,000 and $300,000 tiers), the question must select exactly one of them. If it selects none, several, or sits within a boundary of a tier edge, the question goes to the slow path, which applies the Tier Policy.
+3. **Sibling selection check.** When sibling facts differ only in a qualifier (the $100,000 and $300,000 tiers), the question must select exactly one of them. If it selects several tiers, or sits within a boundary of a tier edge, the question goes to the slow path, which applies the Tier Policy. If it selects none (no published tier or sibling matches, for example a $400,000 loan when the top tier is $300,000), a fully understood question is refused on the fast path. The fast path only answers a certain match with exactly one tier: precision comes before coverage.
 4. **Qualifier contradiction rule.** A fact that carries a qualifier contradicting one the question stated is ineligible. A qualifier the question never mentioned sends the question to the slow path under the Tier Policy.
 5. **Measured precision.** The calibration set includes questions with unusual modifiers, ranges and term phrasings. `τ_accept` is chosen so fast-path precision on a held-out split meets the target (about 97%). If it does not, the grammar is narrowed.
 
@@ -264,26 +264,33 @@ At ingest the Anthropic API key is needed only for prose fact extraction; table 
 
 #### Conflict Resolution
 
-Applied in order. The first strategy that separates the values decides, and **the strategy used is named in `Conflict.reason` and `Answer.conflict_note`**.
+Applied in order. The first step that separates the values decides, and **the strategy used is named in `Conflict.reason` and `Answer.conflict_note`**. The reference date is the `taken_on` of the snapshot being resolved (the snapshot `as_of` selects), never the wall clock.
 
-1. **effective_date** - The value with the later effective date wins. A value whose `expiry_date` precedes the snapshot date is expired and loses.
-2. **source_authority** - If effective dates are equal or unknown, the more authoritative source wins: rate sheet / disclosure / fee schedule > product page > calculator > FAQ / learn article > blog > newsroom / press release / promo banner.
-3. **snapshot_recency** (approved tie-break beyond effective date and authority; weaker evidence, and the reason text says so) - Tie-break by newest snapshot / fetch time.
+0. **Current values only.** An expired value (`expiry_date` on or before the snapshot date) always loses, and so does a value whose `effective_date` is after the snapshot date (not yet in force). If exactly one value is current it wins (strategy `effective_date`); if none is, the conflict is unresolved.
+1. **effective_date** - Among current values that all have an effective date, the latest wins. Values that tie on the latest date go on to step 2. If any current value has no effective date, the date comparison is skipped, because an undated page is not necessarily older.
+2. **source_authority** - The more authoritative source wins: rate sheet / disclosure / fee schedule > product page > calculator > FAQ / learn article > blog > newsroom / press release / promo banner. At an equal rank a table fact beats a prose fact. Values that still share the top rank go on to step 3.
+3. **snapshot_recency** (approved tie-break beyond effective date and authority; weaker evidence, and the reason text says so) - The newest snapshot / fetch time wins.
 4. **unresolved** - `resolution=None`. Queries that touch the key return `confident=False` unless the slow path can justify a choice from the text.
 
-Example `reason`: `strategy=effective_date: 5.39% effective 2026-09-25 beats 5.34% effective 2026-06-09; calculator page is stale`.
+**Design choice: if no competing value is current, the conflict is unresolved.** An expired value, or one whose effective date is after the snapshot, always loses, so "pick the best of the remaining values" only makes sense when something current remains. If every competing value is expired or not yet in force at the snapshot, the system does not rank the expired values against each other by effective date, authority or recency. That would present a value the site itself has withdrawn as the current one, and a confident wrong answer is the most expensive error here. The conflict is still reported (the contradiction existed), with `resolution=None` and a reason that says so (`strategy=unresolved: every competing value is expired: ...`). A question that touches the key returns `confident=False`, or is judged from the page text on the slow path. When exactly one value is current and the rest are expired or not yet in force, the current one wins as in step 0.
+
+Every value in a `reason` is described the same way, winner first, so a reader can cross-check both sides: `<value> (<effective date or "no effective date">, <"live", "expired <date>" or "not yet in force">, [<evidence for the strategy>,] "<page title>")`. Titles are cut at 60 characters, at most three losers are named (the rest become "and N more"), and the winner is always complete. Example `reason`: `strategy=effective_date: 5.39% (effective 2026-09-25, live, "Auto Loan Rates") supersedes 5.34% (effective 2026-06-09, live, "Rate Calculator")`.
 
 ```mermaid
 flowchart TD
     A["Facts sharing one fact_key,<br/>≥2 distinct values"] --> B{"Same qualifiers,<br/>same snapshot?"}
     B -->|no| X["Not a conflict<br/>(tier / term / history)"]
-    B -->|yes| C{"Effective dates<br/>differ?"}
-    C -->|yes| R1["Resolve: later date wins<br/>(expired loses)<br/>strategy = effective_date"]
-    C -->|no| D{"Authority ranks<br/>differ?"}
+    B -->|yes| N{"Values current at the snapshot?<br/>(not expired, effective date not after it)"}
+    N -->|none| R4["Unresolved<br/>resolution = None"]
+    N -->|exactly one| R0["Resolve: the current value<br/>strategy = effective_date"]
+    N -->|two or more| C{"All current values dated,<br/>dates differ?"}
+    C -->|yes| R1["Latest date wins<br/>(a tie continues below)<br/>strategy = effective_date"]
+    C -->|no| D{"Authority ranks differ?<br/>(table beats prose at a tie)"}
+    R1 -.->|tie at latest date| D
     D -->|yes| R2["Resolve: higher authority<br/>strategy = source_authority"]
-    D -->|no| E{"Snapshot recency<br/>differs?"}
+    D -->|no, top rank shared| E{"Snapshot recency<br/>differs?"}
     E -->|yes| R3["Resolve: newer<br/>strategy = snapshot_recency"]
-    E -->|no| R4["Unresolved<br/>resolution = None"]
+    E -->|no| R4
 ```
 
 ### Table Fact Extraction
@@ -418,7 +425,7 @@ The hidden set includes questions about things that changed between snapshots ("
 
 A **tier** is one level of a price list: the "$100,000 or less" and "$300,000 or less" mortgage rows, or a Share Savings balance band. The policy covers a question that does not say which tier it means, such as "What are the mortgage rates right now?" (dup-011) or "the interest rate for a 30-year mortgage" (dup-009). The aim is to give a defensible, labelled answer instead of dumping every tier, because the scorer zeroes an item if a wrong-tier value appears.
 
-* **Detection.** The sibling selection check (guard 3 under Qualifiers) finds that the question matches several sibling facts that differ only in one qualifier (or none of them), and the confidence gate caps the question below `τ_accept`.
+* **Detection.** The sibling selection check (guard 3 under Qualifiers) finds that the question matches several sibling facts that differ only in one qualifier, or sits on a tier boundary, and the confidence gate caps the question below `τ_accept`. A question that matches none of them is not capped; it is refused on the fast path.
 * **Path.** The fast path never guesses a tier, so these questions go to the slow path. Without an Anthropic API key they are refused.
 * **Default tier.** A per-attribute setting in a config file; the starting rule is the entry tier (the lowest amount or balance band). The answer states the tier it used ("for loans up to $100,000").
 * **Other tiers.** The slow path receives all sibling facts, so it can mention others only as labelled alternatives. For a question about one specific product with no amount ("a 30-year mortgage"), it may give the range from the entry tier to the top tier. For a generic question ("mortgage rates"), it leads with the default tier and does not use another tier as the headline.

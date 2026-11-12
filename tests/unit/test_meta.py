@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from kk.ingest.meta import classify_source, extract_dates, is_expired, page_header_dates
+from kk.ingest.meta import (
+    classify_source,
+    extract_dates,
+    is_expired,
+    is_not_yet_in_force,
+    page_header_dates,
+)
 from kk.ingest.parse import parse_markdown
 
 BASE = "https://www.example-cu.test"
@@ -107,7 +113,8 @@ def test_no_title_heading_looks_at_the_first_blocks() -> None:
     ("expiry", "taken_on", "expected"),
     [
         ("2026-01-01", "2026-02-01", True),
-        ("2026-02-01", "2026-02-01", False),
+        ("2026-02-01", "2026-02-01", True),  # expiring on the snapshot date is expired
+        ("2026-02-02", "2026-02-01", False),
         ("2026-03-01", "2026-02-01", False),
         (None, "2026-02-01", False),
         ("2026-01-01", "not-a-date", False),
@@ -116,3 +123,19 @@ def test_no_title_heading_looks_at_the_first_blocks() -> None:
 )
 def test_expired_at_snapshot(expiry: str | None, taken_on: str, expected: bool) -> None:
     assert is_expired(expiry, taken_on) is expected
+
+
+@pytest.mark.parametrize(
+    ("effective", "taken_on", "expected"),
+    [
+        ("2026-03-01", "2026-02-01", True),
+        ("2026-02-02", "2026-02-01", True),
+        ("2026-02-01", "2026-02-01", False),  # in force on its own date
+        ("2026-01-01", "2026-02-01", False),
+        (None, "2026-02-01", False),
+        ("2026-03-01", "not-a-date", False),
+        ("garbage", "2026-02-01", False),
+    ],
+)
+def test_not_yet_in_force_at_snapshot(effective: str | None, taken_on: str, expected: bool) -> None:
+    assert is_not_yet_in_force(effective, taken_on) is expected

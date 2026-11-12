@@ -139,11 +139,26 @@ def page_header_dates(blocks: list[Block]) -> DateInfo:
     return DateInfo(effective, expiry)
 
 
-def is_expired(expiry_date: str | None, taken_on: str) -> bool:
-    """META-4: true if ``expiry_date`` is earlier than the snapshot's ``taken_on``."""
-    if expiry_date is None:
+def _on_or_before(first: str | None, second: str) -> bool:
+    """True if both are valid ISO dates and ``first`` is on or before ``second``."""
+    if first is None:
         return False
     try:
-        return date.fromisoformat(expiry_date) < date.fromisoformat(taken_on)
+        return date.fromisoformat(first) <= date.fromisoformat(second)
+    except ValueError:
+        return False
+
+
+def is_expired(expiry_date: str | None, taken_on: str) -> bool:
+    """META-4: true if ``expiry_date`` is on or before the snapshot's ``taken_on``."""
+    return _on_or_before(expiry_date, taken_on)
+
+
+def is_not_yet_in_force(effective_date: str | None, taken_on: str) -> bool:
+    """META-4: true if ``effective_date`` is later than the snapshot's ``taken_on``."""
+    if effective_date is None:
+        return False
+    try:
+        return date.fromisoformat(effective_date) > date.fromisoformat(taken_on)
     except ValueError:
         return False

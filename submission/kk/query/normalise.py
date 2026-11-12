@@ -283,6 +283,35 @@ def parse_amount_constraint(text: str) -> AmountConstraint | None:
     return _one_sided(cleaned) or _two_sided(cleaned)
 
 
+_TIER_NUMBER = r"\d+(?:\.\d+)?"
+_TIER_BAND = re.compile(rf"^(?P<a>{_TIER_NUMBER})-(?P<b>{_TIER_NUMBER})$")
+_TIER_ONE_SIDED = re.compile(rf"^(?P<op><=|<|>=|>|=)(?P<a>{_TIER_NUMBER})$")
+
+
+def parse_tier_text(text: str) -> AmountConstraint | None:
+    """Read back the tier encoding that table extraction writes into a qualifier.
+
+    The forms are ``<=X``, ``<X``, ``>=X``, ``>X``, ``=X`` and ``lo-hi`` (plain decimal
+    numbers, no currency sign). Anything else is not recognised.
+    """
+    band = _TIER_BAND.match(text)
+    if band is not None:
+        lower, upper = Decimal(band.group("a")), Decimal(band.group("b"))
+        return AmountConstraint(lower, True, upper, True) if lower <= upper else None
+    one = _TIER_ONE_SIDED.match(text)
+    if one is None:
+        return None
+    number, op = Decimal(one.group("a")), one.group("op")
+    forms = {
+        "<=": AmountConstraint(None, False, number, True),
+        "<": AmountConstraint(None, False, number, False),
+        ">=": AmountConstraint(number, True, None, False),
+        ">": AmountConstraint(number, False, None, False),
+        "=": AmountConstraint(number, True, number, True),
+    }
+    return forms[op]
+
+
 # --- 7.4 model years -------------------------------------------------------------------------
 
 _YEAR_MIN, _YEAR_MAX = 1900, 2100

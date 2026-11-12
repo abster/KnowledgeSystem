@@ -20,6 +20,7 @@ from kk.query.normalise import (
     parse_model_years,
     parse_quantity,
     parse_term,
+    parse_tier_text,
 )
 
 
@@ -244,3 +245,25 @@ def test_clean_text_and_dashes() -> None:
     assert clean_text("  a  b\n c ") == "a b c"
     assert clean_text("ｆｕｌｌ Case") == "full Case"
     assert fold_dashes("5–10—20") == "5-10-20"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("<=100000", _ac(None, False, "100000", True)),
+        ("<100000", _ac(None, False, "100000", False)),
+        (">=25000", _ac("25000", True, None, False)),
+        (">25000", _ac("25000", False, None, False)),
+        ("=5000", _ac("5000", True, "5000", True)),
+        ("0.01-4999.99", _ac("0.01", True, "4999.99", True)),
+    ],
+)
+def test_parse_tier_text_reads_the_table_encoding(text: str, expected: AmountConstraint) -> None:
+    assert parse_tier_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text", ["", "100000", "<=", "<=1e5", "5-1", "$100", "<= 100", "a-b", "1-2-3"]
+)
+def test_parse_tier_text_rejects_other_input(text: str) -> None:
+    assert parse_tier_text(text) is None
