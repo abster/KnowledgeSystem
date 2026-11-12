@@ -424,9 +424,9 @@ Ordered rules over the lower-cased question; first match wins.
 
 ### 8.5 Coverage check (fail closed)
 
-* **COV-1** Every rule that extracts something (term, amount, model year, measure, segment, entity, shape cue) records the character span it consumed.
+* **COV-1** Every rule that extracts something (term, amount, model year, measure, segment, entity, shape cue) records the character span it consumed. A word that belongs to what a rule recognised is part of its span: on the question side the word `term` right after a term (`60-month term`) and the cue words of a matched pattern (`has`, `what's`, `still`, `located`, `changed`...).
 * **COV-2** The *residual* is the question with all consumed spans removed. The parse is **fully covered** iff every remaining token is a neutral word, punctuation, or an entity token.
-* **COV-3** Neutral words (initial list, lower case): `a an the is are was were be do does did can could will would should what which who where when how much many about for of on in at to my our your me i we you it its this that these those please tell give show find there any current currently now right today latest new rate rates loan loans account accounts card cards fee fees apply with and or`. **Spec decision:** this list is reviewed with the product owner after the first calibration run, since each addition widens the fast path.
+* **COV-3** Neutral words (initial list, lower case): `a an the is are was were be do does did can could will would should what which who where when how much many for of on in at to my our your me i we you it its this that these those please tell give show find there any current currently now right today latest new rate rates loan loans account accounts card cards fee fees apply with and or dupaco dupaco's`. `about` is deliberately **not** on the list: COV-4 requires it to fail the check. The brand word `dupaco` (and its possessive) is on it because it never changes which fact a question means. **Spec decision:** this list is reviewed with the product owner after the first calibration run, since each addition widens the fast path.
 * **COV-4** Any other word or any number left in the residual makes the parse *not fully covered* (reason `residual:<token>`). This includes unrecognised modifiers (`about`, `roughly`, `around`, `approximately`), unrecognised years, and "half" in "a year and a half".
 * **COV-5** A parse that is not fully covered, is `uncertain`, or whose shape is `other`, MUST NOT use the fast path, MUST NOT be cached, and MUST NOT have a `canonical_key`.
 
@@ -780,7 +780,7 @@ These were chosen while writing the spec because `DESIGN.md` did not settle them
 5. **Answer cache.** In memory and cleared on every `ingest`; not persisted to disk.
 6. **Slow-path deadline.** 15 s total with at most one retry, below the 20 s point where the speed score reaches zero.
 7. **Recognised amount modifiers.** The list in 7.3; anything else fails the coverage check.
-8. **Neutral-word list.** The list in COV-3, to be reviewed after the first calibration run.
+8. **Neutral-word list.** The list in COV-3 (without `about`, removed in Step 6 because COV-4 requires it to fail; with the brand word `dupaco` and `dupaco's`, added in Step 6 by the owner), to be reviewed after the first calibration run.
 9. **Change-cue list.** The broad list in CHG-1; a cue alone sends the question to the slow path, never to the fast path.
 10. **Conflict rebuild.** Rebuilt after every `ingest` rather than once at the end.
 11. **Chunk parent cap.** `chunk.max_tokens = 1200`.

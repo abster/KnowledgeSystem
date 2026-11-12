@@ -410,6 +410,16 @@ def test_refusal_never_adds_a_digit_the_question_lacks() -> None:
     )
 
 
+def test_refusal_drops_a_label_whose_numbers_the_scorer_would_not_find_in_the_question() -> None:
+    # The scorer compares (unit, value): the label's bare 3 is not the question's 3 percent.
+    question = "Does the platinum card have a 3% rate?"
+    assert refusal_text("Platinum 3 Plus", question) == "I couldn't find that information" + SUFFIX
+    # The same digit with the same unit is fine.
+    assert refusal_text("Platinum 3 Plus", "Is Platinum 3 Plus 3% APY?") == (
+        "I couldn't find Platinum 3 Plus" + SUFFIX
+    )
+
+
 def test_safe_refusal_answer() -> None:
     answer = safe_refusal("What is the rate?", "Share Certificate")
     assert isinstance(answer, Answer)

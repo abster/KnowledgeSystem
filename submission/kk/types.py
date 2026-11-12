@@ -10,6 +10,7 @@ from contract import Source
 
 if TYPE_CHECKING:
     from kk.ingest.dedupe import Interval
+    from kk.query.normalise import AmountConstraint
 
 ChunkType = Literal["text_paragraph", "table_row", "table", "list_item"]
 
@@ -148,3 +149,69 @@ class ConflictRecord:
     strategy: str
     reason: str
     ords: tuple[int, ...]
+
+
+Shape = Literal["history", "count", "yes_no", "date", "list", "what", "other"]
+
+
+@dataclass(frozen=True)
+class Span:
+    """A character span of the normalised question consumed by one rule (COV-1)."""
+
+    start: int
+    end: int
+    kind: str
+
+
+@dataclass(frozen=True)
+class QualifierSpan:
+    """A qualifier the question stated (``term`` in months, ``model_year``, ``rate_type``...)."""
+
+    key: str
+    value: str | int
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class ParsedQuestion:
+    """The result of ``parse`` (SPEC 8.2).
+
+    ``covered`` is the COV-2 result and ``uncertain`` is set by ambiguity (ENT-2 and similar).
+    ``reasons`` lists both kinds (``residual:<token>``, ``entity_ambiguous``...). The question
+    may use the fast path only if ``fast_eligible`` (COV-5, GR-1).
+    """
+
+    text: str
+    shape: Shape
+    entity_candidates: tuple[str, ...]
+    entity: str | None
+    entity_score: float
+    measure: str | None
+    qualifiers: tuple[QualifierSpan, ...]
+    amount: AmountConstraint | None
+    change_cue: bool
+    aggregate: bool
+    consumed: tuple[Span, ...]
+    residual: str
+    covered: bool
+    uncertain: bool
+    reasons: tuple[str, ...]
+    pattern: str | None
+    canonical_key: str | None
+
+    @property
+    def qualifier_map(self) -> dict[str, str | int]:
+        """The stated qualifiers as ``key -> value`` (the amount is separate)."""
+        return {q.key: q.value for q in self.qualifiers}
+
+    @property
+    def fast_eligible(self) -> bool:
+        """COV-5 and GR-1: fully covered, certain, not ``other`` and a grammar pattern matched."""
+        return (
+            self.covered
+            and not self.uncertain
+            and self.shape != "other"
+            and self.pattern is not None
+            and self.entity is not None
+        )

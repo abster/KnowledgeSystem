@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from contract import Answer
 from kk.query.normalise import AmountConstraint, parse_tier_text
+from kk.query.validators import extract_numbers
 from kk.types import Fact
 
 if TYPE_CHECKING:
@@ -359,10 +360,16 @@ def _digits(text: str) -> set[str]:
 def refusal_text(entity_label: str | None, question: str) -> str:
     """The safe refusal text (SPEC 12.3): no digit that is not in the question.
 
-    The entity label is named only if every digit in it is also in the question.
+    The entity label is named only if every digit in it is also in the question and every
+    number in it (value and unit, as the scorer reads it) is also a number of the question.
     """
     label = (entity_label or "").strip()
-    phrase = label if label and _digits(label) <= _digits(question) else _FALLBACK_PHRASE
+    safe = (
+        label
+        and _digits(label) <= _digits(question)
+        and extract_numbers(label) <= extract_numbers(question)
+    )
+    phrase = label if safe else _FALLBACK_PHRASE
     return f"I couldn't find {phrase}{_REFUSAL_SUFFIX}"
 
 

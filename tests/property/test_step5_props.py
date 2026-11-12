@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from hypothesis import given
 from hypothesis import strategies as st
+from scoring import _numbers
 
 from kk.query.candidates import select_siblings
 from kk.query.normalise import AmountConstraint
@@ -29,6 +30,7 @@ def test_qualifier_phrase_never_raises(text: str) -> None:
 def test_refusal_never_adds_digits(label: str | None, question: str) -> None:
     text = refusal_text(label, question)
     assert {c for c in text if c.isdigit()} <= {c for c in question if c.isdigit()}
+    assert _numbers(text) <= _numbers(question)  # the scorer's own rule for should_refuse
 
 
 def _constraint(  # noqa: PLR0913, PLR0917

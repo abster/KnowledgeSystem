@@ -358,6 +358,78 @@ def parse_model_years(text: str, *, bare_ok: bool = False) -> ModelYears | None:
     return None
 
 
+@dataclass(frozen=True)
+class AmountMatch:
+    """An amount constraint found in question text, with its span in the folded text."""
+
+    constraint: AmountConstraint
+    start: int
+    end: int
+
+
+_FIND_BODIES = (
+    rf"between\s+{_AMT}\s+and\s+{_AMT}",
+    rf"{_AMT}\s*(?:-|to)\s*{_AMT}",
+    rf"{_AMT}\s+or less",
+    rf"{_AMT}\s+or more",
+    rf"{_AMT}\s*\+",
+    rf"{_UPPER_INCLUSIVE}\s+{_AMT}",
+    rf"{_UPPER_STRICT}\s+{_AMT}",
+    rf"{_LOWER_INCLUSIVE}\s+{_AMT}",
+    rf"{_LOWER_STRICT}\s+{_AMT}",
+    _AMT,
+)
+_FIND_AMOUNT = [_compile(rf"(?<![\w$])(?:{body})(?!\w)") for body in _FIND_BODIES]
+
+
+def find_amount_constraints(text: str) -> list[AmountMatch]:
+    """Find every recognised amount phrase (SPEC 7.3, question side). Unknown modifiers stay out.
+
+    A longer phrase wins over the plain amount inside it (``up to $5,000`` is one match), and
+    each match is read by ``parse_amount_constraint`` so the question side and the table side
+    share one meaning. Spans refer to the folded text.
+    """
+    cleaned = _prepare(text)
+    found: list[AmountMatch] = []
+    for pattern in _FIND_AMOUNT:
+        for match in pattern.finditer(cleaned):
+            constraint = parse_amount_constraint(match.group(0))
+            if constraint is not None:
+                found.append(AmountMatch(constraint, match.start(), match.end()))
+    found.sort(key=lambda m: (m.start, -(m.end - m.start)))
+    chosen: list[AmountMatch] = []
+    for candidate in found:
+        if not chosen or candidate.start >= chosen[-1].end:
+            chosen.append(candidate)
+    return chosen
+
+
+@dataclass(frozen=True)
+class ModelYearMatch:
+    """A model year or range found in question text, with its span in the folded text."""
+
+    years: ModelYears
+    start: int
+    end: int
+
+
+_MY_YEAR = r"(?:'\d{2}|\d{4}(?:\s*(?:-|to)\s*(?:\d{4}|\d{2}))?)"
+_MY_FIND = re.compile(
+    rf"(?<![\w'])(?P<y>{_MY_YEAR})\s+(?:model[- ]years?|models?|vehicles?)(?!\w)", re.IGNORECASE
+)
+
+
+def find_model_years(text: str) -> list[ModelYearMatch]:
+    """Find a year or range next to ``model`` or ``vehicle`` (SPEC 7.4); other years stay out."""
+    cleaned = _prepare(text)
+    found: list[ModelYearMatch] = []
+    for match in _MY_FIND.finditer(cleaned):
+        years = parse_model_years(f"{match.group('y')} model")
+        if years is not None:
+            found.append(ModelYearMatch(years, match.start(), match.end()))
+    return found
+
+
 # --- 7.5 dates (never the question) ----------------------------------------------------------
 
 _MONTHS = {
