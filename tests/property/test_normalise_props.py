@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from decimal import Decimal
 
 from hypothesis import given, settings
@@ -23,6 +24,11 @@ from kk.query.normalise import (
 )
 
 _NO_DEADLINE = settings(deadline=None, max_examples=200)
+
+
+def _has_no_digit_after_nfkc(char: str) -> bool:
+    """SPEC 7.6: text is NFKC-normalised first, so ``¹`` and fullwidth digits are digits."""
+    return not any(c.isdigit() for c in unicodedata.normalize("NFKC", char))
 
 
 @_NO_DEADLINE
@@ -55,7 +61,12 @@ def test_count_round_trip(value: int) -> None:
 
 
 @_NO_DEADLINE
-@given(st.text(alphabet=st.characters(blacklist_categories=("Nd", "Cs")), max_size=30))
+@given(
+    st.text(
+        alphabet=st.characters(blacklist_categories=("Nd", "Cs")).filter(_has_no_digit_after_nfkc),
+        max_size=30,
+    )
+)
 def test_text_without_digits_is_never_a_number(text: str) -> None:
     assert parse_quantity(text) is None
 

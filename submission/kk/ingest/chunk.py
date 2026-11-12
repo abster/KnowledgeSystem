@@ -101,7 +101,7 @@ def _footer_dates(notes: list[str]) -> DateInfo:
     return DateInfo(effective, expiry)
 
 
-def _carry_down(table: TableBlock) -> list[tuple[str, ...]]:
+def carry_down(table: TableBlock) -> list[tuple[str, ...]]:
     """TBL-7 applied to rendering: a blank first cell takes the label of the row above."""
     rows: list[tuple[str, ...]] = []
     label = ""
@@ -209,6 +209,21 @@ def _add_layout_table(builder: _Builder, table: TableBlock, headers: tuple[str, 
                     builder.add("list_item" if is_item else "text_paragraph", text, headers)
 
 
+def table_row_text(
+    title: str, nearest_heading: str, header: tuple[str, ...], row: tuple[str, ...]
+) -> str:
+    """CH-2: the self-contained text of one table row (page title, heading, ``header: cell``)."""
+    prefix = (
+        title if not nearest_heading or nearest_heading == title else f"{title} - {nearest_heading}"
+    )
+    parts = [
+        f"{header[col]}: {cell}" if col < len(header) and header[col] else cell
+        for col, cell in enumerate(row)
+        if cell.strip()
+    ]
+    return " | ".join([prefix, *parts])
+
+
 def _add_table(
     builder: _Builder,
     table: TableBlock,
@@ -216,7 +231,7 @@ def _add_table(
     headers: tuple[str, ...],
     nearest: str,
 ) -> None:
-    rows = _carry_down(table)
+    rows = carry_down(table)
     if not rows:
         return
     footer_dates = _footer_dates(notes)
@@ -233,20 +248,10 @@ def _add_table(
     parent_id = (
         parent.chunk_id if parent is not None else make_chunk_id(builder.url, headers, parent_text)
     )
-    prefix = (
-        builder.title if not nearest or nearest == builder.title else f"{builder.title} - {nearest}"
-    )
     for row_index, row in enumerate(rows):
-        parts = [
-            f"{table.header[col]}: {cell}"
-            if col < len(table.header) and table.header[col]
-            else cell
-            for col, cell in enumerate(row)
-            if cell.strip()
-        ]
         builder.add(
             "table_row",
-            " | ".join([prefix, *parts]),
+            table_row_text(builder.title, nearest, table.header, row),
             headers,
             parent_id=parent_id,
             dates=footer_dates,
