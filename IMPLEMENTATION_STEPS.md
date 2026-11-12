@@ -9,7 +9,7 @@ A step is ticked only after its work is committed and you have approved it. A se
 - [x] Step 1: Project facts and the verification skill
 - [x] Step 2: Tooling, stub submission and Docker
 - [x] Step 3: Normaliser, parsing, chunking and validity intervals (pure)
-- [ ] Step 4: Table fact extraction and aliases (pure)
+- [x] Step 4: Table fact extraction and aliases (pure)
 - [ ] Step 5: Conflicts, fact resolution, tiers, history and templates (pure over in-memory facts)
 - [ ] Step 6: Question understanding, validators and confidence (pure)
 - [ ] Step 7: Storage, embeddings, retrieval and ingest wiring

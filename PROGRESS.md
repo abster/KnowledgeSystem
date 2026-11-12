@@ -27,3 +27,14 @@
 * Deviations (approved with the report): `is_layout_table` (TBL-1) lives in `chunk.py` because chunking needs it; footer notes (CH-4) stop at the first non-paragraph block; `chunk_page` takes no `max_tokens` (CH-3 windowing is `window_parent`); `Chunk` has extra fields `row_index`, `row_count`, `footer_count`, `fetched_at`, `position`; heuristic constants (80-character header line, 40-character cue window, 50% for "most" cells) are named constants, not in `config.json`; duplicate chunks within a page are collapsed.
 * Open items for Step 4: reuse `is_layout_table`; apply TBL-2 header normalisation (footnote digits are still in `TableBlock.header`); review the `other` source-class URLs in the report against META-5.
 * Open items for Step 7: an extended row keeps a stale `parent_id` and `effective_date` when only the table footer changes; `make verify` takes about 100 s because of the `real_data` tests under coverage.
+
+## Step 4: Table fact extraction and aliases (pure)
+* Commit: 27e08cd
+* Eval A: `qa_score` 0.093, errors 0, unchanged and per-question identical (`results/baseline_263af7d/`, `results/after_263af7d_step4/`).
+* Eval S: `qa_score` 0.2, final 0.17, conflicts F1 0.0, unchanged (`results/selftest_*_263af7d*/`).
+* Environment: API key present, no extraction cache. `make verify` passes: 322 tests, coverage 97.4%, about 4 minutes.
+* Real data (`results/coverage_step4.json`): latest snapshot has 233 data tables, 55 with facts (23.6%), 786 facts; snapshots 01 to 04 have 15 to 17 such tables. No REJECT or QUARANTINE table gives a fact. The P7 quarantine in snapshots 01 to 03 is a real table with dividend rate above APY.
+* Approved regressions: none.
+* Deviations (approved with the report): the Step 3 test `test_text_without_digits_is_never_a_number` now filters characters whose NFKC form has a digit; a dash or `None` in a qualifier column means no tier; TBL-2 also strips a footnote digit after `)`; `chunk.carry_down` and `table_row_text` are public; `make coverage-report` added.
+* Open items for the lexicon review: heading-only entities rarely resolve (103 P2 rejects, 18 TBL-10 tables: certificates, `Term | Rate | Points | APR`), so consider using the entity-column header as the entity for qualifier-only labels (a rule change, raise as drift); unmapped `apr (as low as)`, `annual percentage rate (apr)`, `card type`, and the `% APR` value suffix; bold-line headings are not used.
+* Open items for Step 5: facts have no `fact_id` or interval ordinals yet (Step 7); `degraded` pairs come from `diff_fact_keys` and must reach the answer path.
