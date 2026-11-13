@@ -141,5 +141,14 @@ def embed_in_batches(
 
 
 def load_embedder() -> EmbedderLike:
-    """Load the shipped model (``build()`` calls this once, IF-1)."""
-    return Embedder()
+    """Load the shipped model behind the on-disk vector cache (``build()`` calls this, IF-1)."""
+    from kk.ingest.embed_cache import (  # noqa: PLC0415 - avoids an import cycle
+        CachedEmbedder,
+        EmbeddingCache,
+        default_cache_dir,
+        model_fingerprint,
+    )
+
+    model = Embedder()
+    cache = EmbeddingCache(default_cache_dir(), fingerprint=model_fingerprint(MODEL_DIR))
+    return CachedEmbedder(model, cache)

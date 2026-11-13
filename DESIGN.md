@@ -196,7 +196,7 @@ Local `bge-small-en-v1.5` via fastembed (ONNX Runtime): 384 dimensions, CPU only
 | API embeddings (Voyage, OpenAI) | best quality | needs network and key at ingest; non-reproducible |
 | TF-IDF / hashed rules | trivial | weak on paraphrase ("lost debit card" vs "card replacement") |
 
-Embedding happens in ingest only, so it does not affect answer speed. Estimated <2 minutes for ~10k chunks on 8 cores (to be measured, and deduplication means only new chunks are embedded for each later snapshot). The model weights are bundled in the submission folder (`models/`, kept out of git), so ingest needs no download and works offline.
+Embedding happens in ingest only, so it does not affect answer speed. Vectors are also cached on disk by model fingerprint and text, so repeating an ingest (every `make verify` runs two) does not re-embed the corpus; the cache is only an optimisation and switches itself off on any error. Estimated <2 minutes for ~10k chunks on 8 cores (to be measured, and deduplication means only new chunks are embedded for each later snapshot). The model weights are bundled in the submission folder (`models/`, kept out of git), so ingest needs no download and works offline.
 
 ### Fact Model and Conflict Detection
 

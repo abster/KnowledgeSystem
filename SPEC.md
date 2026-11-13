@@ -307,6 +307,7 @@ Outcomes (one logged decision per table): ACCEPT (facts emitted); ACCEPT inferre
 * **EMB-2** Only `table_row`, `text_paragraph` and `list_item` chunks are embedded, in batches of at most 64 texts and at most `embed.max_batch_chars` characters (a text counts at most 2,000 characters, the model's 512-token window), using the model's document prefix. Texts are batched in order of length and the vectors are returned in input order. The character limit exists because the memory of a batch grows with the square of its text length (SPEC decision 24). Questions use the model's query prefix.
 * **EMB-3** Only new chunk rows are embedded. Extended intervals reuse the stored vector.
 * **EMB-4** Vectors are L2-normalised so cosine similarity equals the dot product.
+* **EMB-5** Document vectors are cached on disk (`submission/cache/embeddings/vectors.sqlite`, or the directory in `KK_EMBED_CACHE_DIR`; git-ignored). The key is `sha256(model fingerprint + NUL + exact text)`, where the fingerprint hashes the model's ONNX and tokenizer files, so another model or another text never reuses a vector. Query vectors are not cached. The cache is an optimisation only: if it cannot be opened, read or written, it switches itself off with one warning and everything is embedded, and a stored vector of the wrong size counts as a miss. A model failure is never cached (SPEC decision 25).
 
 ### 6.9 Alias list
 
@@ -799,6 +800,7 @@ These were chosen while writing the spec because `DESIGN.md` did not settle them
 22. **None values in history.** A history whose winning fact is a none value is untrusted and goes to the slow path; no rule words it (HSEG-3).
 23. **A re-dated or re-parented chunk is a new interval.** ING-8 extends a row only when `chunk_id`, `effective_date`, `expiry_date` and `parent_id` are all unchanged (the owner chose this in Step 7). Costs a few extra rows; keeps effective dates and parent lookups correct for every `target_ord`.
 24. **Embedding batches are limited by characters as well as count.** Measured on the real chunks: at 64 texts per batch the longest texts raised the peak of ingest to 4.0 GB (budget 3 GB); at 8,000 characters per batch the model stays at its idle footprint with about the same throughput. Changes EMB-2; adds `embed.max_batch_chars` (the owner chose this in Step 7).
+25. **Embedding cache.** Embedding the corpus takes about 8 minutes on a laptop CPU and `make verify` ingests it twice, so vectors are cached by model fingerprint and text (EMB-5). It does not change any vector, so accuracy is unchanged; it makes a repeat ingest about a minute. Whether the cache directory is shipped with the hand-in is left open (a shipped cache would make grading ingest faster, a missing one only costs time). Added after Step 7 at the owner's request.
 
 ## 22. Deferred to the implementation plan
 
