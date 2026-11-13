@@ -36,6 +36,7 @@ def test_shipped_config_is_valid_and_matches_spec_3() -> None:
     assert cfg.flags.llm_crosscheck is False
     assert cfg.flags.ingest_llm_verify is True
     assert cfg.chunk.max_tokens == 1200
+    assert cfg.embed.max_batch_chars == 8000
     assert cfg.cache.max_entries == 10000
     assert cfg.tier.default_by_attribute == {"*": "entry"}
 
@@ -88,3 +89,12 @@ def test_config_is_read_only() -> None:
     cfg = load_config()
     with pytest.raises(Exception):  # noqa: B017, PT011 - pydantic frozen error
         cfg.retrieval.top_k = 1  # type: ignore[misc]
+
+
+def test_embed_batch_budget_must_be_positive(tmp_path: Path) -> None:
+    raw = json.loads(DEFAULT_CONFIG_PATH.read_text())
+    raw["embed"]["max_batch_chars"] = 0
+    bad = tmp_path / "config.json"
+    bad.write_text(json.dumps(raw))
+    with pytest.raises(ConfigError):
+        load_config(bad)

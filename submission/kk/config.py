@@ -104,6 +104,12 @@ class Chunk(_Section):
     max_tokens: int = Field(gt=0)
 
 
+class Embed(_Section):
+    """Embedding batch limit: a batch holds at most this many characters (see EMB-2)."""
+
+    max_batch_chars: int = Field(gt=0)
+
+
 class CacheCfg(_Section):
     """Answer-cache size."""
 
@@ -120,6 +126,7 @@ class Config(_Section):
     llm: Llm
     flags: Flags
     chunk: Chunk
+    embed: Embed
     cache: CacheCfg
 
 

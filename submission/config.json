@@ -9,6 +9,10 @@
     "llm": {"set_by": "SPEC 3 initial value", "dataset": "none"},
     "flags": {"set_by": "SPEC 3 initial value", "dataset": "none"},
     "chunk": {"set_by": "SPEC decision 11", "dataset": "none"},
+    "embed": {
+      "set_by": "Step 7 memory measurement (peak RSS of the longest chunk texts: 1.4 GB at 64 per batch, 0.36 GB at 8000 characters per batch)",
+      "dataset": "real snapshot 05 chunk texts; no accuracy data involved"
+    },
     "cache": {"set_by": "SPEC 3 initial value", "dataset": "none"}
   },
   "retrieval": {"top_k": 20, "per_index_k": 40, "rrf_k": 60},
@@ -27,5 +31,6 @@
   },
   "flags": {"polish": false, "llm_crosscheck": false, "ingest_llm_verify": true},
   "chunk": {"max_tokens": 1200},
+  "embed": {"max_batch_chars": 8000},
   "cache": {"max_entries": 10000}
 }

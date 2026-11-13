@@ -8,8 +8,15 @@ import pytest
 from contract import Answer, KnowledgeSystem, Page, Snapshot
 from kk.system import REFUSAL_TEXT
 from solution import build
+from tests.fixtures.embedder import FakeEmbedder
 
 DIGITS = re.compile(r"\d")
+
+
+@pytest.fixture(autouse=True)
+def _fake_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stub tests do not need the real embedding model."""
+    monkeypatch.setattr("kk.system.load_embedder", FakeEmbedder)
 
 
 def _snapshot(snapshot_id: str = "01_2026-01-05_baseline") -> Snapshot:
@@ -62,7 +69,7 @@ def test_ingest_records_snapshots_in_order_without_page_text(work_dir: Path) -> 
     ks = build()
     ks.ingest(_snapshot("01_a"))
     ks.ingest(_snapshot("02_b"))
-    assert ks.snapshot_ids == ["01_a", "02_b"]  # type: ignore[attr-defined]
+    assert [s.snapshot_id for s in ks.store.snapshots] == ["01_a", "02_b"]  # type: ignore[attr-defined]
 
 
 def test_build_writes_only_under_work_dir_and_not_stdout(

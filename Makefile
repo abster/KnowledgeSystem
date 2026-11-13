@@ -4,7 +4,7 @@ RUN ?= local
 UV ?= uv run
 
 .PHONY: verify lint format-check types security test build gate eval eval-selftest \
-	export-requirements check-key coverage-report
+	export-requirements check-key coverage-report fetch-model
 
 verify: lint format-check types security test build gate
 
@@ -48,3 +48,6 @@ check-key:
 coverage-report:
 	PYTHONPATH=submission:harness $(UV) python -m kk.ingest.tables_report \
 		--snapshots snapshots --out results/coverage_$(RUN).json
+
+fetch-model:
+	PYTHONPATH=submission:harness $(UV) python tools/fetch_model.py

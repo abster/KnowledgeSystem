@@ -116,3 +116,49 @@ def test_invalid_taken_on_gives_no_date_but_still_ingests() -> None:
     store.add_snapshot(1, "garbage", [_chunk("alpha text")])
     (interval,) = store.intervals
     assert interval.first_seen_date is None and interval.last_seen_date is None
+
+
+def _with(chunk: Chunk, **changes: object) -> Chunk:
+    return Chunk(**{**chunk.__dict__, **changes})
+
+
+def test_changed_effective_date_opens_a_new_interval_for_the_same_chunk_id() -> None:
+    """ING-8 (revised): an unchanged chunk_id with changed metadata is a new interval."""
+    store = IntervalStore()
+    old = _with(_chunk("alpha text"), effective_date="2026-05-01")
+    new = _with(old, effective_date="2026-05-15")
+    store.add_snapshot(1, "2026-05-12", [old])
+    delta = store.add_snapshot(2, "2026-05-19", [new])
+    assert (len(delta.new), len(delta.extended)) == (1, 0)
+    assert _key(store, "alpha text") == [(1, 1), (2, 2)]
+    assert store.intervals[0].chunk.effective_date == "2026-05-01"
+    assert store.intervals[1].chunk.effective_date == "2026-05-15"
+    keys = [(i.chunk.chunk_id, i.first_seen_ord) for i in store.intervals]
+    assert len(keys) == len(set(keys))
+
+
+def test_changed_expiry_or_parent_also_opens_a_new_interval() -> None:
+    base = _with(_chunk("alpha text"), parent_id="parent-a")
+    for changes in ({"expiry_date": "2026-06-01"}, {"parent_id": "parent-b"}):
+        store = IntervalStore()
+        store.add_snapshot(1, "2026-05-12", [base])
+        delta = store.add_snapshot(2, "2026-05-19", [_with(base, **changes)])
+        assert (len(delta.new), len(delta.extended)) == (1, 0), changes
+
+
+def test_unchanged_metadata_still_extends_after_a_renewal() -> None:
+    store = IntervalStore()
+    old = _with(_chunk("alpha text"), effective_date="2026-05-01")
+    new = _with(old, effective_date="2026-05-15")
+    store.add_snapshot(1, "2026-05-12", [old])
+    store.add_snapshot(2, "2026-05-19", [new])
+    delta = store.add_snapshot(3, "2026-06-09", [new])
+    assert (len(delta.new), len(delta.extended)) == (0, 1)
+    assert _key(store, "alpha text") == [(1, 1), (2, 3)]
+
+
+def test_fetched_at_alone_never_breaks_an_interval() -> None:
+    store = IntervalStore()
+    store.add_snapshot(1, "2026-05-12", [_chunk("alpha text")])
+    delta = store.add_snapshot(2, "2026-05-19", [_with(_chunk("alpha text"), fetched_at="later")])
+    assert len(delta.extended) == 1

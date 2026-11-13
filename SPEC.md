@@ -98,6 +98,7 @@ All numbers that this spec calls "initial" live in `submission/config.json`, are
 | `flags.llm_crosscheck` | Query-time LLM cross-check of the question parse | false |
 | `flags.ingest_llm_verify` | Ingest-time LLM verification of table row-label parses | true |
 | `chunk.max_tokens` | Cap on a returned parent table | 1200 |
+| `embed.max_batch_chars` | Most characters in one embedding batch (EMB-2) | 8000 |
 | `cache.max_entries` | Answer-cache size | 10000 |
 
 `tau_floor`, `tau_accept` and the weights in this table are placeholders from `DESIGN.md`'s worked examples. The calibration procedure (section 12.4) produces the real values.
@@ -208,8 +209,9 @@ Rebuilt in full at the end of each `ingest`. Fields: `conflict_id`, `topic`, `fa
 
 * **ING-7** `normalised_text` is the text with Unicode NFKC normalisation, collapsed whitespace and trimmed ends. Case is preserved.
 * **ING-8** For each chunk in the snapshot with ordinal `k`:
-  * If a row with the same `chunk_id` and `last_seen_ord == k - 1` exists, extend it: set `last_seen_ord = k`, update `last_seen_date` and `fetched_at`. No new embedding or extraction is done.
-  * Otherwise create a new row with `first_seen_ord = last_seen_ord = k`. This covers both a brand-new chunk and a chunk that disappeared and came back (a new interval, with a new primary key, because `first_seen_ord` differs).
+  * If a row with the same `chunk_id` and `last_seen_ord == k - 1` exists **and** the chunk's `effective_date`, `expiry_date` and `parent_id` equal those of the row, extend it: set `last_seen_ord = k`, update `last_seen_date`, `fetched_at` and the position fields (`position`, `row_index`, `row_count`, `footer_count`). No new embedding or extraction is done.
+  * Otherwise create a new row with `first_seen_ord = last_seen_ord = k`. This covers a brand-new chunk, a chunk that disappeared and came back, and a chunk whose dates or parent changed while its text did not (a new interval, with a new primary key, because `first_seen_ord` differs; the vector of the earlier interval is reused, so nothing is embedded again).
+  * The dates and the parent are not part of `chunk_id` but each row carries them, so they must not be hidden by an extension: a footer that gets a new "effective as of" date, or another row of the table changing (which changes the parent table's `chunk_id`), would otherwise leave a stale date or a parent that is no longer visible at the target ordinal (SPEC decision 23).
 * **ING-9** A chunk not present in snapshot `k` is not extended. The page-removal rule follows: a page missing from a snapshot has no visible chunks in it.
 * **ING-10** The facts of an extended chunk have their interval extended in the same step. A fact is never re-extracted for an unchanged chunk.
 
@@ -302,7 +304,7 @@ Outcomes (one logged decision per table): ACCEPT (facts emitted); ACCEPT inferre
 ### 6.8 Embeddings
 
 * **EMB-1** Model: `bge-small-en-v1.5` loaded with `fastembed` from the bundled `submission/models/` path. Loading MUST NOT use the network; if the weights are missing, `build()` raises a clear error (this is a packaging bug, not a runtime condition).
-* **EMB-2** Only `table_row`, `text_paragraph` and `list_item` chunks are embedded, in batches of 64, using the model's document prefix. Questions use the model's query prefix.
+* **EMB-2** Only `table_row`, `text_paragraph` and `list_item` chunks are embedded, in batches of at most 64 texts and at most `embed.max_batch_chars` characters (a text counts at most 2,000 characters, the model's 512-token window), using the model's document prefix. Texts are batched in order of length and the vectors are returned in input order. The character limit exists because the memory of a batch grows with the square of its text length (SPEC decision 24). Questions use the model's query prefix.
 * **EMB-3** Only new chunk rows are embedded. Extended intervals reuse the stored vector.
 * **EMB-4** Vectors are L2-normalised so cosine similarity equals the dot product.
 
@@ -795,10 +797,12 @@ These were chosen while writing the spec because `DESIGN.md` did not settle them
 20. **Resolution order.** Expired (on or before `D`) and not-yet-in-force values lose first; the latest effective date decides next, and only among dated values; authority and then recency apply only to what remains; a shared top rank goes to recency instead of being unresolved. `D` is the snapshot's `taken_on`. (Changes 10.3, CR-1 and META-4.)
 21. **Tier selection errs on precision.** A certain match with exactly one tier is answered on the fast path; a boundary or a match with several tiers goes to the slow path; no match is a fast-path refusal. (Changes SIB-3 to SIB-5, 12.1 cap 5, 12.2 and TIER-1.)
 22. **None values in history.** A history whose winning fact is a none value is untrusted and goes to the slow path; no rule words it (HSEG-3).
+23. **A re-dated or re-parented chunk is a new interval.** ING-8 extends a row only when `chunk_id`, `effective_date`, `expiry_date` and `parent_id` are all unchanged (the owner chose this in Step 7). Costs a few extra rows; keeps effective dates and parent lookups correct for every `target_ord`.
+24. **Embedding batches are limited by characters as well as count.** Measured on the real chunks: at 64 texts per batch the longest texts raised the peak of ingest to 4.0 GB (budget 3 GB); at 8,000 characters per batch the model stays at its idle footprint with about the same throughput. Changes EMB-2; adds `embed.max_batch_chars` (the owner chose this in Step 7).
 
 ## 22. Deferred to the implementation plan
 
-* Exact `bge-small-en-v1.5` weight packaging and size.
+* Exact `bge-small-en-v1.5` weight packaging and size (Step 7: fastembed's quantised ONNX build, about 64 MB, fetched once with `make fetch-model` into `submission/models/`).
 * The BM25 upper bound used in the similarity signal.
 * The measured ingest time and the extraction cache size.
 * The URL survey behind the authority rules.
