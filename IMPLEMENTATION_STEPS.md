@@ -12,7 +12,7 @@ A step is ticked only after its work is committed and you have approved it. A se
 - [x] Step 4: Table fact extraction and aliases (pure)
 - [x] Step 5: Conflicts, fact resolution, tiers, history and templates (pure over in-memory facts)
 - [x] Step 6: Question understanding, validators and confidence (pure)
-- [ ] Step 7: Storage, embeddings, retrieval and ingest wiring
+- [x] Step 7: Storage, embeddings, retrieval and ingest wiring
 - [ ] Step 8: LLM client, prose facts and the extraction cache
 - [ ] Step 9: Fast-path `answer()`, cache and calibration
 - [ ] Step 10: Slow path, packaging and README
