@@ -6,7 +6,10 @@
       "dataset": "none; replaced by the calibration procedure (SPEC 12.4, Step 9)"
     },
     "tier": {"set_by": "SPEC 3 initial value", "dataset": "none (hypothesis, SPEC decision 13)"},
-    "llm": {"set_by": "SPEC 3 initial value", "dataset": "none"},
+    "llm": {
+      "set_by": "SPEC 3 initial value; 24 workers were tried in Step 8 and about 16% of calls were rate limited (429/503), so it stays 8 until a lower-failure value is measured",
+      "dataset": "Step 8 cold ingest of the real snapshots (call counts only); no accuracy data involved"
+    },
     "flags": {"set_by": "SPEC 3 initial value", "dataset": "none"},
     "chunk": {"set_by": "SPEC decision 11", "dataset": "none"},
     "embed": {

@@ -39,7 +39,7 @@ kk = ["py.typed"]
 [tool.pytest.ini_options]
 pythonpath = ["submission", "harness"]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers -m 'not live'"
 markers = [
     "real_data: needs the real snapshots/ folder; skipped when it is absent",
     "live: calls the Anthropic API; run manually",

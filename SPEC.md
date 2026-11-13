@@ -293,11 +293,11 @@ Outcomes (one logged decision per table): ACCEPT (facts emitted); ACCEPT inferre
 #### 6.7.3 Prose and layout-table facts (LLM)
 
 * **PRO-1** Candidate chunks: all `text_paragraph`, `list_item` and layout-table chunks that contain a digit, a currency sign or a percent sign, or contain a cue word (`hours`, `open`, `closed`, `closing`, `located`, `address`, `phone`, `fee`, `eligible`, `member`). Other chunks yield no facts.
-* **PRO-2** For each candidate the extraction model (`llm.extract_model`, temperature 0, structured output) receives the chunk text, its header path and the attribute vocabulary, and returns a list of `{entity, attribute, qualifiers, value, unit, quote}` where `quote` is a verbatim substring of the chunk.
+* **PRO-2** For each candidate the extraction model (`llm.extract_model`, structured output through a forced tool call, no sampling parameters, decision 26) receives the chunk text, its header path and the attribute vocabulary, and returns a list of `{entity, attribute, qualifiers, value, unit, quote}` where `quote` is a verbatim substring of the chunk.
 * **PRO-3** A returned fact is accepted only if: the attribute is in the vocabulary; the quote is a verbatim substring of the chunk text; and every digit sequence in `value` appears in the quote. Otherwise it is dropped and counted.
 * **PRO-4** Accepted facts get `origin = prose_llm`, a lower authority tie-break than table facts when the rank is equal, and qualifiers normalised through section 7.
 * **PRO-5** *Cache.* The cache key is `sha256(prompt_version + model + chunk_text + header_path)`. A hit returns the stored result with no call. A call result (including "no facts") is stored. A failed call (timeout, rate limit, malformed output) is **not** stored, so the next run retries.
-* **PRO-6** Calls run concurrently up to `llm.extract_concurrency`, with up to two retries on rate-limit or server errors (exponential backoff, deterministic jitter-free schedule of 1 s and 4 s).
+* **PRO-6** Calls run concurrently up to `llm.extract_concurrency`. Transient errors (timeout, connection, HTTP 429 and 5xx) are retried. When the server states a wait (`retry-after`), that wait is honoured, at least 1 s and at most 60 s, for up to five retries, and every worker waits with it (one shared pause). With no stated wait, up to two retries after 1 s and 4 s (deterministic, jitter-free). A call that still fails gives no facts and is not cached (PRO-5).
 * **PRO-7** With no API key and no cache entry, the chunk yields no facts. This is logged once per run, not per chunk, and appears in the ingest summary.
 * **PRO-8** The prompt, its version string and the response schema are stored under `kk/ingest/prompts/` and changing them MUST change `prompt_version`.
 
@@ -499,12 +499,12 @@ A conflict is a **coexisting contradiction**: within one snapshot, two or more *
 ### 10.2 Detection algorithm
 
 1. For each ordinal `k`, take all facts whose interval contains `k`.
-2. Group by `fact_key`. Compare `value_num` (or lowercased `value_text` for text values) after normalisation.
+2. Keep only facts with a numeric value (`value_num` is not null). Group them by `fact_key` and compare `value_num`. Free-text facts (`prose`, `hours`, `address`, `phone`, `eligibility`, `status`) never take part: they have no normal form, and two different sentences about one entity are not a contradiction (decision 27).
 3. Groups with at least two distinct values on at least two distinct URLs are conflict candidates for `k`.
 4. Merge across ordinals by `(fact_key, frozenset of normalised values)`, collecting the list of ordinals where it coexisted.
 5. Resolve each merged candidate (section 10.3) using its **latest** ordinal.
 
-Facts with `entity_inferred = true` or from a quarantined table do not take part (precision first). Facts with `none_value` do not take part.
+Facts with `entity_inferred = true` or from a quarantined table do not take part (precision first). Facts with `none_value` or without a numeric value do not take part.
 
 ### 10.3 Resolution
 
@@ -641,7 +641,7 @@ The slow path receives: the question (original text); the target snapshot date; 
 
 ### 13.2 Call and output
 
-* **SLOW-1** One call to `llm.slow_model` at temperature 0, with structured output (tool use) matching: `answerable` (bool), `answer` (string), `evidence_ids` (list of chunk or fact ids), `loser_values_mentioned` (list of strings, must be empty).
+* **SLOW-1** One call to `llm.slow_model` with structured output matching (no sampling parameters, decision 26): `answerable` (bool), `answer` (string), `evidence_ids` (list of chunk or fact ids), `loser_values_mentioned` (list of strings, must be empty).
 * **SLOW-2** The system prompt instructs: answer only from the supplied evidence; never use a value marked stale, expired or superseded; state the assumed tier when the question omits it; say `answerable=false` when the evidence does not contain the answer.
 * **SLOW-3** The answer is accepted only if `answerable` is true, every `evidence_id` was supplied, the validators pass, and the response parsed against the schema.
 * **SLOW-4** Total time for one slow-path answer is bounded by `llm.slow_deadline_s`. One retry is allowed only for rate-limit or server errors and only if more than half the deadline remains. After the deadline the result is the safe refusal.
@@ -682,7 +682,7 @@ Stated limit: V2 can only catch stale values that became facts; V1 is the main s
 
 ## 15. Determinism and consistency
 
-* **DET-1** All LLM calls use temperature 0. Where a result matters for later behaviour (extraction), it is cached by content hash.
+* **DET-1** LLM calls send no sampling parameters (decision 26), so a repeat of an uncached call is not guaranteed to match. Where a result matters for later behaviour (extraction), it is cached by content hash.
 * **DET-2** No unordered container's iteration order may affect output; sorting is explicit everywhere (conflicts, candidates, sources, list items).
 * **DET-3** There is no randomness in ranking, tie-breaking, sampling or splitting; the calibration split uses a stable hash.
 * **DET-4** Answers are rendered from fact fields, not copied from raw text, so questions that map to the same facts give the same numbers.
@@ -801,12 +801,16 @@ These were chosen while writing the spec because `DESIGN.md` did not settle them
 23. **A re-dated or re-parented chunk is a new interval.** ING-8 extends a row only when `chunk_id`, `effective_date`, `expiry_date` and `parent_id` are all unchanged (the owner chose this in Step 7). Costs a few extra rows; keeps effective dates and parent lookups correct for every `target_ord`.
 24. **Embedding batches are limited by characters as well as count.** Measured on the real chunks: at 64 texts per batch the longest texts raised the peak of ingest to 4.0 GB (budget 3 GB); at 8,000 characters per batch the model stays at its idle footprint with about the same throughput. Changes EMB-2; adds `embed.max_batch_chars` (the owner chose this in Step 7).
 25. **Embedding cache.** Embedding the corpus takes about 8 minutes on a laptop CPU and `make verify` ingests it twice, so vectors are cached by model fingerprint and text (EMB-5). It does not change any vector, so accuracy is unchanged; it makes a repeat ingest about a minute. Whether the cache directory is shipped with the hand-in is left open (a shipped cache would make grading ingest faster, a missing one only costs time). Added after Step 7 at the owner's request.
+26. **No temperature; Haiku 5.5 for extraction.** Current models take no sampling parameters on the default API version, so "temperature 0" (PRO-2, SLOW-1, DET-1) cannot be sent to the chosen models. Haiku 5.5 was kept for cost (about $2.70 against about $20 to $27 for Haiku 4.5 at temperature 0 on API version `2023-06-01`, measured in Step 8). Determinism of LLM output comes from the extraction cache only; DESIGN "Model choice and determinism" records the trade-off (the owner chose this in Step 8). Also: a measured extraction call takes about 1.4 s, and 24 parallel workers were rate limited (HTTP 429 and 503 on about 16% of calls), so retries became rate-limit aware (PRO-6, as amended).
+27. **Conflicts use numeric facts only.** After Step 8 added prose facts, the real snapshots gave 482 conflicts, of which 379 were free-text `prose` facts and about 100 more eligibility, address, status, count, phone and hours text; only 3 were numeric. Several different sentences about one entity share one fact key (entity, attribute, no qualifiers), which is not a contradiction. Detection now keeps only facts with a numeric value (the owner chose this in Step 8). Costs: a planted contradiction in a text fact (for example two different opening hours) is not reported.
+28. **Row labels drop apostrophes.** `Investor's Choice` becomes `Investors Choice`, not `Investor s Choice` (found in Step 8 when the row-label verifier rejected such rows). Other punctuation still separates words.
 
 ## 22. Deferred to the implementation plan
 
 * Exact `bge-small-en-v1.5` weight packaging and size (Step 7: fastembed's quantised ONNX build, about 64 MB, fetched once with `make fetch-model` into `submission/models/`).
 * The BM25 upper bound used in the similarity signal.
 * The measured ingest time and the extraction cache size.
+* Entity names for prose facts: the model names one product differently on different pages ("6 month certificate", "certificates"), so equal facts get different fact keys and some contradictions are missed (found in Step 8; the selftest conflict is one). To be settled in Step 9 together with entity linking.
 * The URL survey behind the authority rules.
 * The final initial values for confidence weights, `tau_floor`, `tau_accept`, produced by calibration.
 * Whether the query-time LLM cross-check (`flags.llm_crosscheck`) is switched on, decided by held-out precision (AC-9).

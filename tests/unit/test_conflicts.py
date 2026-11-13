@@ -445,3 +445,48 @@ def test_to_contract_keeps_fields_in_order() -> None:
 def test_make_fact_helper_matches_fact_key_rule() -> None:
     f = make_fact(qualifiers={"term": 6})
     assert len(f.fact_key) == 64
+
+
+# --- only comparable (numeric) facts form conflicts (SPEC 10.2 as amended in Step 8) --------------
+
+
+@pytest.mark.parametrize(
+    ("attribute", "first", "second"),
+    [
+        ("prose", "We are a movement", "Chartered in 1948"),
+        ("hours", "8 a.m.-5 p.m.", "Closes at 6PM"),
+        ("address", "4615 Crosse Pointe Blvd.", "4615 Crosse..."),
+        ("phone", "800-383-1700", "563-557-7600"),
+        ("eligibility", "Business accounts are excluded", "Public funds are not accepted"),
+        ("status", "newly opened", "opened in December 2020"),
+    ],
+)
+def test_text_facts_on_the_same_key_never_form_a_conflict(
+    attribute: str, first: str, second: str
+) -> None:
+    versions = [
+        _cert(value=first, url=A, attribute=attribute, qualifiers={}, origin="prose_llm"),
+        _cert(value=second, url=B, attribute=attribute, qualifiers={}, origin="prose_llm"),
+    ]
+    assert all(v.fact.value_num is None for v in versions)
+    assert detect_conflicts(versions, snapshots=SNAPS) == []
+
+
+def test_numeric_prose_facts_still_conflict() -> None:
+    versions = [
+        _cert(value="2.95%", url=A, origin="prose_llm"),
+        _cert(value="3.50%", url=B, origin="prose_llm"),
+    ]
+    assert len(detect_conflicts(versions, snapshots=SNAPS)) == 1
+
+
+def test_a_count_and_a_fee_conflict_but_their_text_neighbours_do_not() -> None:
+    fee = [
+        _cert(value="$25", url=A, attribute="fee", qualifiers={}),
+        _cert(value="$30", url=B, attribute="fee", qualifiers={}),
+    ]
+    text = [
+        _cert(value="free", url=A, attribute="fee", qualifiers={"term": 1}),
+        _cert(value="waived", url=B, attribute="fee", qualifiers={"term": 1}),
+    ]
+    assert len(detect_conflicts(fee + text, snapshots=SNAPS)) == 1

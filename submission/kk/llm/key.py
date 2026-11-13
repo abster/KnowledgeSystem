@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import NoReturn
 
 ENV_VAR = "ANTHROPIC_API_KEY"
+ENV_FILE_VAR = "KK_ENV_FILE"  # lets tests point at a missing file so they never see the real key
 DEFAULT_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 _REDACTED = "ApiKey(<redacted>)"
 
@@ -69,12 +70,17 @@ def _from_env_file(path: Path) -> str | None:
     return None
 
 
+def _default_env_file() -> Path:
+    override = os.environ.get(ENV_FILE_VAR)
+    return Path(override) if override else DEFAULT_ENV_FILE
+
+
 def load_key(env_file: Path | None = None) -> ApiKey | None:
     """Return the key if one is configured, else ``None``.
 
     The environment variable wins over the ``.env`` file. A blank value counts as absent.
     """
-    value = os.environ.get(ENV_VAR) or _from_env_file(env_file or DEFAULT_ENV_FILE)
+    value = os.environ.get(ENV_VAR) or _from_env_file(env_file or _default_env_file())
     if value is None or not value.strip():
         return None
     return ApiKey(value.strip())

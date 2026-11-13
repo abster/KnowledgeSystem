@@ -91,6 +91,24 @@ class RowRef:
 
 
 @dataclass(frozen=True)
+class RowParse:
+    """How one row label was read (TBL-12): the label text and what the rules made of it."""
+
+    label: str
+    qualifier_cells: tuple[str, ...]
+    entity_label: str
+    qualifiers: str
+
+
+@dataclass(frozen=True)
+class ParsedRow:
+    """A row parse and the facts it produced, as ``(chunk_id, fact_key)`` pairs."""
+
+    parse: RowParse
+    fact_ids: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class TableDecision:
     """The one logged decision per table, with the facts it emitted."""
 
@@ -101,6 +119,7 @@ class TableDecision:
     facts: tuple[Fact, ...]
     unmapped_headers: tuple[str, ...]
     dropped_rows: int
+    rows: tuple[ParsedRow, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -144,6 +163,9 @@ def _qualifier_json(qualifiers: Mapping[str, QualifierValue]) -> str:
     return json.dumps(dict(qualifiers), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+encode_qualifiers = _qualifier_json  # public name for the prose extractor (same encoding)
+
+
 # --- TBL-5 labels ----------------------------------------------------------------------------
 
 _N = r"\d[\d,]*(?:\.\d+)?"
@@ -169,6 +191,7 @@ _PRODUCT_QUALIFIER = {
     "jumbo": ("loan_type", "jumbo"),
 }
 _BAD_RESIDUAL = re.compile(r"\$|(?<!\w)\d[\d,.]*(?!\w)")
+_APOSTROPHES = re.compile(r"['\u2019`]")  # joined, not spaced: "Investor's" is one word
 _PUNCTUATION = re.compile(r"[^\w\s]|_")
 
 
@@ -252,10 +275,22 @@ def _parse_label(text: str, *, amount_key: str) -> _Label:  # noqa: PLR0911, PLR
             return _FAILED
     rest = clean_text(_PRODUCT_WORD.sub(" ", rest))
 
-    residual = clean_text(_PUNCTUATION.sub(" ", rest))
+    residual = clean_text(_PUNCTUATION.sub(" ", _APOSTROPHES.sub("", rest)))
     if _BAD_RESIDUAL.search(residual):
         return _FAILED
     return _Label(ok=True, qualifiers=qualifiers, residual=residual, amount=constraint)
+
+
+def normalise_qualifier(key: str, value: str) -> QualifierValue | None:
+    """SPEC section 7 form of one qualifier phrase, or ``None`` when it cannot be decided.
+
+    Used for prose facts (PRO-4): the same rules as table row labels. The phrase must yield
+    exactly the qualifier ``key`` and nothing else; anything more, less or unclear is ``None``.
+    """
+    label = _parse_label(value, amount_key=key)
+    if not label.ok or label.residual or set(label.qualifiers) != {key}:
+        return None
+    return label.qualifiers[key]
 
 
 # --- TBL-6 values ----------------------------------------------------------------------------
@@ -449,8 +484,18 @@ def _decision(  # noqa: PLR0913
     *,
     facts: Sequence[Fact] = (),
     dropped: int = 0,
+    rows: Sequence[ParsedRow] = (),
 ) -> TableDecision:
-    return TableDecision(outcome, gate, reason, heading, tuple(facts), columns.unmapped, dropped)
+    return TableDecision(
+        outcome, gate, reason, heading, tuple(facts), columns.unmapped, dropped, tuple(rows)
+    )
+
+
+def _row_parse(row: _Row, columns: _Columns, heading: str) -> RowParse:
+    """TBL-12: the label text and qualifier cells of a row with what the rules made of them."""
+    label = row.cells[columns.entity] if columns.entity is not None else heading
+    cells = tuple(row.cells[c] for c in columns.qualifiers if not _is_unset(row.cells[c]))
+    return RowParse(label, cells, row.entity_label, _qualifier_json(row.qualifiers))
 
 
 def _pick_ref(refs: Sequence[RowRef | None] | RowRef, index: int) -> RowRef | None:
@@ -530,6 +575,7 @@ def extract_table(  # noqa: PLR0911, PLR0912
 
     facts: list[Fact] = []
     seen: dict[str, Fact] = {}
+    kept: dict[int, list[tuple[str, str]]] = {}
     for row in built:
         ref = _pick_ref(refs, row.index)
         if ref is None:  # pragma: no cover - such rows were dropped above
@@ -539,6 +585,7 @@ def extract_table(  # noqa: PLR0911, PLR0912
             if earlier is None:
                 seen[fact.fact_key] = fact
                 facts.append(fact)
+                kept.setdefault(row.index, []).append((fact.chunk_id, fact.fact_key))
             elif (earlier.value_num, earlier.none_value) != (fact.value_num, fact.none_value):
                 return _decision(
                     "QUARANTINE",
@@ -562,7 +609,14 @@ def extract_table(  # noqa: PLR0911, PLR0912
             "REJECT", "TBL-10", "no cell gave a fact", heading, columns, dropped=dropped
         )
     outcome: Outcome = "ACCEPT_INFERRED" if any(f.entity_inferred for f in facts) else "ACCEPT"
-    return _decision(outcome, None, "ok", heading, columns, facts=facts, dropped=dropped)
+    rows_out = [
+        ParsedRow(_row_parse(row, columns, heading), tuple(kept[row.index]))
+        for row in built
+        if row.index in kept
+    ]
+    return _decision(
+        outcome, None, "ok", heading, columns, facts=facts, dropped=dropped, rows=rows_out
+    )
 
 
 # --- pages -----------------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 """``KnowledgeSystem``: ingest wired end to end; ``answer`` is still the refuse-all stub.
 
-Step 7 builds the real index (chunks, table facts, conflicts). The answer path arrives in
+Step 7 builds the real index (chunks, table facts, conflicts) and Step 8 adds prose facts and
+row-label verification from the extraction model, cached on disk. The answer path arrives in
 Step 9, so every question is refused until then.
 """
 
@@ -12,7 +13,11 @@ from contract import Answer, Conflict, Snapshot
 from kk.config import Config, load_config
 from kk.conflicts import to_contract
 from kk.ingest.embed import EmbedderLike, load_embedder
+from kk.ingest.extract_cache import ExtractionCache, default_cache_dir
 from kk.ingest.pipeline import IngestState, IngestSummary, ingest_snapshot
+from kk.ingest.prose import ProseExtractor
+from kk.ingest.rowcheck import RowLabelVerifier
+from kk.llm.client import LlmClient, PauseGate, make_client
 from kk.log import get_logger, setup_logging, work_dir_from_env
 from kk.store import Store
 
@@ -23,8 +28,17 @@ REFUSAL_TEXT = "I couldn't find that information on Dupaco's website. Please con
 class KnowledgeSystem:
     """Ingests snapshots into LanceDB; refuses every question until Step 9."""
 
-    def __init__(self, config: Config | None = None, embedder: EmbedderLike | None = None) -> None:
-        """Load configuration, the embedding model and an empty store (IF-1, no network)."""
+    def __init__(
+        self,
+        config: Config | None = None,
+        embedder: EmbedderLike | None = None,
+        llm_client: LlmClient | None = None,
+    ) -> None:
+        """Load configuration, the embedding model and an empty store (IF-1, no network).
+
+        ``llm_client`` replaces the real client in tests; by default a client is built only if an
+        API key exists. Without one, ingest still uses cached extraction results (PRO-7).
+        """
         self.config = config or load_config()
         self.work_dir = work_dir_from_env()
         setup_logging(self.work_dir)
@@ -34,6 +48,28 @@ class KnowledgeSystem:
             self.work_dir / "lance", max_batch_chars=self.config.embed.max_batch_chars
         )
         self._state = IngestState()
+        client = llm_client if llm_client is not None else make_client()
+        cache = ExtractionCache(default_cache_dir())
+        llm = self.config.llm
+        gate = PauseGate()  # one rate-limit pause shared by every worker (PRO-6)
+        self._prose = ProseExtractor(
+            client=client,
+            cache=cache,
+            model=llm.extract_model,
+            concurrency=llm.extract_concurrency,
+            gate=gate,
+        )
+        self._verifier = (
+            RowLabelVerifier(
+                client=client,
+                cache=cache,
+                model=llm.extract_model,
+                concurrency=llm.extract_concurrency,
+                gate=gate,
+            )
+            if self.config.flags.ingest_llm_verify
+            else None
+        )
         self.last_summary: IngestSummary | None = None
 
     @property
@@ -41,13 +77,25 @@ class KnowledgeSystem:
         """``(entity, attribute)`` pairs marked degraded by TBL-11 (used by the answer path)."""
         return self._state.degraded
 
+    @property
+    def prose_labels(self) -> frozenset[str]:
+        """Entity ids named by prose facts (for entity linking in Step 9)."""
+        return frozenset(self._state.prose_labels)
+
     def ingest(self, snapshot: Snapshot) -> None:
         """Ingest one snapshot completely before returning (IF-2).
 
         A malformed page is skipped and counted. Only an embedding or store failure raises,
         because the index would be incomplete (SPEC 6.11).
         """
-        self.last_summary = ingest_snapshot(self.store, self.embedder, snapshot, self._state)
+        self.last_summary = ingest_snapshot(
+            self.store,
+            self.embedder,
+            snapshot,
+            self._state,
+            prose=self._prose,
+            verifier=self._verifier,
+        )
 
     def answer(self, question: str, as_of: str | None = None) -> Answer:
         """Return the safe refusal (SPEC 12.3). Never raises."""

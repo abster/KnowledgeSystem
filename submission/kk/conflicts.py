@@ -227,8 +227,17 @@ def _conflict_id(fact_key: str, norms: Sequence[NormValue]) -> str:
 def detect_conflicts(
     versions: Sequence[FactVersion], *, snapshots: Sequence[SnapshotRef]
 ) -> list[ConflictRecord]:
-    """Find, merge, resolve and order the coexisting contradictions (SPEC 10.2 to 10.6)."""
-    eligible = [v for v in versions if not v.fact.entity_inferred and not v.fact.none_value]
+    """Find, merge, resolve and order the coexisting contradictions (SPEC 10.2 to 10.6).
+
+    Only facts with a numeric value take part: free text (prose, hours, address, phone,
+    eligibility, status) has no normal form, so two different sentences about one entity are
+    not a contradiction (SPEC 10.2, decision 27).
+    """
+    eligible = [
+        v
+        for v in versions
+        if not v.fact.entity_inferred and not v.fact.none_value and v.fact.value_num is not None
+    ]
     coexisting: dict[tuple[str, frozenset[NormValue]], list[int]] = defaultdict(list)
     for snap in sorted(snapshots, key=lambda s: s.ordinal):
         by_key: dict[str, list[FactVersion]] = defaultdict(list)

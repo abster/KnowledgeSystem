@@ -481,3 +481,24 @@ def test_family_index_groups_keys_by_entity_and_attribute() -> None:
     }
     assert all(len(keys) == 3 for keys in index.values())
     assert set(next(iter(index.values())).values()) == {"https://x.test/p"}
+
+
+@pytest.mark.parametrize("apostrophe", ["'", "\u2019", "`"])
+def test_an_apostrophe_in_a_row_label_is_dropped_not_turned_into_a_space(apostrophe: str) -> None:
+    table = _make(
+        ["Account Type", "Balance Tier", "Dividend Rate"],
+        [[f"Investor{apostrophe}s Choice Money Market", "$25,000+", "1.50%"]],
+    )
+    decision = _decide(table, heading="Business Savings")
+    (fact,) = decision.facts
+    assert fact.entity == "investors choice money market"
+    assert fact.entity_label == "Investors Choice Money Market"
+
+
+def test_other_punctuation_in_a_row_label_still_separates_words() -> None:
+    table = _make(
+        ["Account Type", "Balance Tier", "Dividend Rate"],
+        [["High-Yield Savings (Business)", "$25,000+", "1.50%"]],
+    )
+    (fact,) = _decide(table, heading="Business Savings").facts
+    assert fact.entity_label == "High Yield Savings Business"

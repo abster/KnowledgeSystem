@@ -12,6 +12,7 @@ import json
 import sys
 import tempfile
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,16 @@ def measure(snapshots: list[Snapshot]) -> dict[str, Any]:
                 "tables_rejected": summary.tables_rejected,
                 "facts_by_origin": summary.facts_by_origin,
                 "embed_seconds": summary.embed_seconds,
+                "prose": asdict(summary.prose),
+                "verify": {
+                    "checked": summary.verify_checked,
+                    "rejected": summary.verify_rejected,
+                    "calls": summary.verify_calls,
+                    "cache_hits": summary.verify_cache_hits,
+                    "failures": summary.verify_failures,
+                    "skipped_no_key": summary.verify_skipped_no_key,
+                    "facts_removed": summary.verify_facts_removed,
+                },
             }
         )
     records = ks.store.conflict_records()

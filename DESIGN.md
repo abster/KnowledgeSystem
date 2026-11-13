@@ -13,11 +13,11 @@
 ## Non-functional Requirements
 
 * Accuracy - 55% of the score; target >90% on `public_eval.jsonl`. Repeating a stale or wrong-tier value scores zero for that question, so correctness of the resolved value matters more than answer completeness. This is the primary optimisation target and wins every trade-off against speed.
-* Consistency - Reworded questions (same `group`) and repeated questions must produce the same values. Achieved by determinism (temperature 0, answers rendered from resolved facts, canonical-key cache), not by luck.
+* Consistency - Reworded questions (same `group`) and repeated questions must produce the same values. Achieved by determinism (answers rendered from resolved facts, canonical-key cache, LLM results cached by content), not by luck. The models take no temperature (see "Model choice and determinism"), so determinism of LLM calls comes from the cache.
 * Latency - Speed is 15% and multiplied by accuracy. Goal: P99 of 1–2 s on the common path (fast path + cache). The slow path may take longer: hard ceiling 20 s (speed score reaches 0 there; harness limit is 60 s). Treat this as a soft goal, since accuracy is worth more than speed. Ingest takes minutes (target <5 min, hard limit 30 min), and ingest time is not scored.
 * Availability/Failure Handling - Never raise from `answer()`. A missing API key, LLM timeout, rate limit or malformed LLM output degrades to the fast-path answer (non-confident when the evidence is weak). The system runs fully in-process with no server dependency, so there are no network dependencies other than the optional LLM. Ingest-time LLM extraction is cached on disk, so a rerun or a partial failure resumes cheaply.
 * Scalability - ~700 pages × 5 snapshots, deduplicated to ≈5–15k chunks. This design is sized for that dataset, not for millions of documents. If the corpus grew by orders of magnitude, the embedded store would be swapped for a server vector DB (see Vector Database).
-* Reproducibility - The same snapshots produce the same index and the same answers. LLM outputs used at ingest are cached by content hash; the slow path uses temperature 0.
+* Reproducibility - The same snapshots produce the same index and the same answers. LLM outputs used at ingest are cached by content hash. Current models accept no sampling parameters, so a cache miss or a changed prompt can give different LLM output (see "Model choice and determinism").
 * Security - Only the provided snapshots are used (no live website calls). The Anthropic API key (`ANTHROPIC_API_KEY`) is read from the environment and never logged or persisted. Snapshot data is not redistributed (excluded from git). Dependencies are audited (`pip-audit`, `bandit`).
 * Monitoring - Not in the hand-in, but the design logs structured per-query events (path taken, confidence, cache hit, latency, retrieved fact ids) and ingest counters. These feed the eval reports and would feed production dashboards.
 
@@ -76,7 +76,7 @@ Chunks and facts are not split by path: both paths use both. The real difference
 | Qualifiers and question extraction | Core of the match and of the confidence score | Run first anyway, because the confidence gate decides which path a question takes |
 | Template | Renders the answer text; optional light-model polish, off by default | Not used; the model writes the answer from structured output |
 | Validators | Yes | Yes |
-| LLM | None by default (optional polish and cross-check flags) | Sonnet 5.5, structured output, temperature 0; also change-cue questions that do not qualify for the fast history template, which see the fact-history view |
+| LLM | None by default (optional polish and cross-check flags) | Sonnet 5.5, structured output; also change-cue questions that do not qualify for the fast history template, which see the fact-history view |
 
 Haiku also appears at ingest, to extract facts from prose (cached), and at ingest to verify table row-label parses. That is separate from answer-time use.
 
@@ -204,7 +204,7 @@ A **fact** is one atomic claim:
 `(entity, attribute, qualifiers, value, unit, chunk_id, effective_date, expiry_date, authority)`.
 Example: `(mortgage, rate, {purchase, 30-year fixed, ≤$100k}, 7.13%)`. The **fact key** is `(entity, attribute, all qualifiers)`. Facts with different keys are different facts, never conflicts; this is how tiers, terms, rate vs APY and personal vs business stay apart.
 
-Extraction happens entirely at ingest (never at query time): table rows by deterministic rules (see Table Fact Extraction); prose by a Haiku-class LLM, temperature 0, cached on disk by chunk hash. Chunks unchanged from an earlier snapshot reuse their facts, so each later snapshot only pays for new or changed text. The conflicts table is built once, after the last snapshot, so `conflicts()` does no work at call time.
+Extraction happens entirely at ingest (never at query time): table rows by deterministic rules (see Table Fact Extraction); prose by a Haiku-class LLM (no temperature, see "Model choice and determinism"), cached on disk by chunk hash. Chunks unchanged from an earlier snapshot reuse their facts, so each later snapshot only pays for new or changed text. The conflicts table is built once, after the last snapshot, so `conflicts()` does no work at call time.
 
 #### Qualifiers
 
@@ -244,7 +244,7 @@ Ingest and answer share **one normaliser**, so "60-month" in a question and "60 
 |---|---|---|
 | Handles odd phrasing | no, falls to the slow path | yes |
 | Latency | well under 1 ms | about 0.5–1.5 s on every question |
-| Determinism | full | not guaranteed even at temperature 0, which risks the consistency score |
+| Determinism | full | not guaranteed (the models take no temperature), which risks the consistency score |
 | Failure mode | predictable and unit-testable | silent, plausible and varying |
 | Needs the Anthropic API key | no | yes; without it, back to rules |
 | Cost | none | one call per question |
@@ -254,13 +254,23 @@ An LLM does not remove wrong details; it trades testable mistakes for unpredicta
 * **Query time:** rules plus guards 1–5. An optional **LLM cross-check** (rules and the LLM parse the question independently; the fast path runs only if they agree and the coverage check passes) is behind a flag, **off by default**. It is turned on only if the held-out calibration shows fast-path precision below target. When on, the LLM call runs in parallel with retrieval, is cached by normalised question, and is skipped for questions with no numbers or qualifier words.
 * **Ingest time:** an LLM verifies each *distinct* table row-label parse once (offline, cached, no query latency). A disagreement quarantines that row's facts (same outcome as a failed plausibility gate). This checks the table side of every match for free.
 
+#### Model choice and determinism
+
+**Decision (Step 8): extraction uses Haiku 5.5 with no temperature, chosen for cost. This sacrifices determinism of the sampler.** Current models take no sampling parameters on the default API version (`2026-10-21`; the SDK sends it). On the older version `2023-06-01`, Haiku 5.5 accepts only `temperature` 1, and Haiku 4.5 is the only Haiku that accepts `temperature` 0. Measured with the real API (about 1.4 s per call on both): Haiku 4.5 at temperature 0 would cost roughly ten times more for the cold ingest (about $20 to $27 against about $2.70 for Haiku 5.5) and would depend on the older API version staying available. The owner chose Haiku 5.5.
+
+What remains of determinism, and what does not:
+
+* The extraction cache, keyed by prompt version, model, text and header path, returns the same result for the same input. The shipped cache makes grading ingest repeatable.
+* On a cache miss, or when the prompt or model changes, the extraction model may return different output for the same text. The PRO-3 checks (attribute in the vocabulary, verbatim quote, every digit of the value in the quote) bound what a different output can contain, but they cannot make two runs agree.
+* The same holds for the slow path (Step 10): the same question may phrase or choose differently on two uncached runs. Consistency there rests on the validators, the template-rendered fast path and the answer cache.
+
 #### Extraction cache and the Anthropic API key
 
 "Key" in this document means one of: the **Anthropic API key** (`ANTHROPIC_API_KEY`, the credential), a **fact key**, a **primary key**, or a **cache key**. The credential is always written in full.
 
 At ingest the Anthropic API key is needed only for prose fact extraction; table rows use rules and need none. Without it the prose facts are missing, and prose questions fall to the slow path (which also needs the key) and are refused. To avoid depending on the key at grading time, **the extraction cache is shipped with the submission** (keyed by chunk content hash). If the hidden eval uses the same snapshots, ingest then needs no key and gives identical results every run. The cache holds text derived from the website data, so it is kept out of git like the snapshots and travels only inside the submission folder.
 
-**Conflict definition (explicit call-out):** a conflict is a *coexisting contradiction*. The same fact key carries different normalised values on different live pages within the same snapshot, including a stale or expired page that is still live (e.g. a promo page still showing an old rate). These are **not** conflicts: different tiers, terms or qualifiers; rate vs APY; formatting differences (`3.5%` = `3.50 %`); and a value that was simply replaced over time (that is history, queried through `as_of`). Conflicts are scanned over all snapshots and de-duplicated by (topic, value set).  The scan always covers all snapshots, not only the latest, because a planted contradiction may have been fixed later; the cost is possible extra entries for contradictions that no longer exist.
+**Conflict definition (explicit call-out):** a conflict is a *coexisting contradiction*. Only facts with a numeric value take part; free text (prose, hours, address, phone, eligibility, status) has no normal form, so two different sentences about one entity are not a contradiction (SPEC decision 27). The same fact key carries different normalised values on different live pages within the same snapshot, including a stale or expired page that is still live (e.g. a promo page still showing an old rate). These are **not** conflicts: different tiers, terms or qualifiers; rate vs APY; formatting differences (`3.5%` = `3.50 %`); and a value that was simply replaced over time (that is history, queried through `as_of`). Conflicts are scanned over all snapshots and de-duplicated by (topic, value set).  The scan always covers all snapshots, not only the latest, because a planted contradiction may have been fixed later; the cost is possible extra entries for contradictions that no longer exist.
 
 #### Conflict Resolution
 
@@ -394,7 +404,7 @@ sequenceDiagram
             end
         else low confidence
             S->>L: strong model with resolved facts + parent chunks
-            L-->>S: structured answer (temperature 0)
+            L-->>S: structured answer
         end
         S->>S: validators (grounding, no loser values, refusal rules)
         S->>C: store
@@ -406,7 +416,7 @@ sequenceDiagram
 * **Cache** - Key = (shape, entity, sorted qualifiers, `target_ord`), built by the same rules as question extraction. Only questions that pass the full-coverage check are cached or looked up; a question that fails it is never served from the cache. Paraphrases share an entry when they parse to the same key. There is no embedding-similarity lookup, because "30-year" and "15-year" questions are close in embedding space and a near-neighbour hit could return the wrong tier. Persisted across the repeat pass. Failures and refusals caused by errors are not cached.
 * **Fast path** - Hybrid retrieval (`top_k` ≈ 20 chunks, unrelated to `target_ord`) → fact resolver → a deterministic template or extractive answer, optionally polished by a light model (Haiku 5.5, short output, 1.5 s timeout).
 * **Confidence score** - Computed locally from similarity, margin, qualifier match, entity match and the conflict-resolution state, with hard caps for missing templates, unresolved conflicts, aggregates, multi-page lists, and any question that fails the fail-closed guards in Qualifiers. Two calibrated thresholds, `τ_floor` and `τ_accept`, decide between refusal, the slow path and the fast answer. See Confidence Score and Thresholds below.
-* **Slow path** - Strong model (Sonnet 5.5, Opus 5.5 configurable) receives the resolved facts, parent chunks and conflict notes, and returns structured output at temperature 0.
+* **Slow path** - Strong model (Sonnet 5.5, Opus 5.5 configurable) receives the resolved facts, parent chunks and conflict notes, and returns structured output.
 * **Validators** (both paths) - Every number in the answer appears in the cited evidence; no loser or stale value in `text`; refusal text has no digits and `confident=False`; the winner's URL is cited.
 * **Tier policy** - When the question omits a qualifier such as the amount tier, see Tier Policy below. Only the slow path applies it.
 * **Calibration** - Thresholds are calibrated on a training split of the public eval plus synthetic paraphrases, to avoid overfitting 40 questions.
@@ -588,7 +598,7 @@ The loser value appears only in `conflict_note`, e.g. `strategy=effective_date: 
 
 ### Consistency
 
-Determinism end to end: temperature 0, answers rendered from resolved fact ids rather than raw text, canonical-key cache, stable tie ordering. The scorer compares the set of numbers in answers, so paraphrases that map to one fact key return identical numbers.
+Determinism end to end: LLM results cached, answers rendered from resolved fact ids rather than raw text, canonical-key cache, stable tie ordering. The scorer compares the set of numbers in answers, so paraphrases that map to one fact key return identical numbers.
 
 ### Evaluation and Verification
 
@@ -669,7 +679,7 @@ Whether to answer from retrieved text or from resolved facts. Text-only answers 
 1. Embedding weights are bundled in the submission folder (decided), since an offline grader would make a download a total-failure risk. Open: confirm the folder size is acceptable.
 2. The `first_seen/last_seen` interval refinement and the `snapshot_recency` tie-break (step 3) are approved additions to the original proposal; revisit if the eval shows they hurt.
 3. Confidence thresholds calibrated on 40 questions can overfit. Mitigated by synthetic paraphrases and a held-out split.
-4. LLM extraction nondeterminism, mitigated by caching and temperature 0.
+4. LLM extraction nondeterminism, mitigated by caching, the verbatim-quote and digit checks (PRO-3) and ingest-time verification; sampling cannot be pinned (see "Model choice and determinism").
 5. Tier policy against the public eval: dup-009 expects both 7.13 and 7.25, dup-011 expects one tier only. The Tier Policy rule (specific product gives a range, generic question gives the default tier) is a hypothesis that must hold on held-out paraphrases, not only on these two questions.
 6. Questions that mention a past date in text while `as_of=null` are answered as current (by design).
 7. Ingest time depends on the number of fact-bearing prose chunks sent to the LLM; not yet measured. Calls run concurrently, results are cached, and the shipped cache removes the cost at grading time.
