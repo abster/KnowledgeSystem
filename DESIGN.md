@@ -410,10 +410,10 @@ sequenceDiagram
         S->>C: store
     end
     S-->>H: Answer
-    Note over S,L: No key, timeout or error: return the fast-path answer
+    Note over S,L: No key, timeout or error on the slow path: safe refusal
 ```
 
-* **Cache** - Key = (shape, entity, sorted qualifiers, `target_ord`), built by the same rules as question extraction. Only questions that pass the full-coverage check are cached or looked up; a question that fails it is never served from the cache. Paraphrases share an entry when they parse to the same key. There is no embedding-similarity lookup, because "30-year" and "15-year" questions are close in embedding space and a near-neighbour hit could return the wrong tier. Persisted across the repeat pass. Failures and refusals caused by errors are not cached.
+* **Cache** - Key = (shape, entity, measure, sorted qualifiers, `target_ord`), built by the same rules as question extraction. Only questions that pass the full-coverage check are cached or looked up; a question that fails it is never served from the cache. Paraphrases share an entry when they parse to the same key. There is no embedding-similarity lookup, because "30-year" and "15-year" questions are close in embedding space and a near-neighbour hit could return the wrong tier. In memory and cleared by every `ingest` (SPEC decision 5). Failures and refusals caused by errors are not cached.
 * **Fast path** - Hybrid retrieval (`top_k` ≈ 20 chunks, unrelated to `target_ord`) → fact resolver → a deterministic template or extractive answer, optionally polished by a light model (Haiku 5.5, short output, 1.5 s timeout).
 * **Confidence score** - Computed locally from similarity, margin, qualifier match, entity match and the conflict-resolution state, with hard caps for missing templates, unresolved conflicts, aggregates, multi-page lists, and any question that fails the fail-closed guards in Qualifiers. Two calibrated thresholds, `τ_floor` and `τ_accept`, decide between refusal, the slow path and the fast answer. See Confidence Score and Thresholds below.
 * **Slow path** - Strong model (Sonnet 5.5, Opus 5.5 configurable) receives the resolved facts, parent chunks and conflict notes, and returns structured output.

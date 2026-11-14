@@ -26,8 +26,10 @@ def test_shipped_config_is_valid_and_matches_spec_3() -> None:
     assert cfg.retrieval.top_k == 20
     assert cfg.retrieval.per_index_k == 40
     assert cfg.retrieval.rrf_k == 60
-    assert cfg.confidence.tau_floor == 0.30
-    assert cfg.confidence.tau_accept == 0.80
+    # tau_floor, tau_accept and bm25_bound are set by `make calibrate` (SPEC 12.4); the file
+    # must still be a valid pair and say where the numbers came from
+    assert 0.0 <= cfg.confidence.tau_floor < cfg.confidence.tau_accept <= 1.0
+    assert "calibration" in cfg.provenance["confidence"].set_by
     assert cfg.llm.slow_model == "claude-sonnet-5-5"
     assert cfg.llm.extract_model == "claude-haiku-5-5"
     assert cfg.llm.slow_deadline_s == 15
@@ -98,3 +100,25 @@ def test_embed_batch_budget_must_be_positive(tmp_path: Path) -> None:
     bad.write_text(json.dumps(raw))
     with pytest.raises(ConfigError):
         load_config(bad)
+
+
+# --- confidence.bm25_bound (Step 9: the BM25 upper bound of the similarity signal) -----------
+
+
+def test_shipped_config_has_a_positive_bm25_bound() -> None:
+    assert load_config().confidence.bm25_bound > 0
+
+
+@pytest.mark.parametrize("bad", [0, -1.0, "10"])
+def test_a_bad_bm25_bound_is_an_error(tmp_path: Path, bad: object) -> None:
+    data = _shipped()
+    data["confidence"]["bm25_bound"] = bad
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, data))
+
+
+def test_a_missing_bm25_bound_is_an_error(tmp_path: Path) -> None:
+    data = _shipped()
+    del data["confidence"]["bm25_bound"]
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, data))

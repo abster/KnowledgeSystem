@@ -1,8 +1,8 @@
-"""``KnowledgeSystem``: ingest wired end to end; ``answer`` is still the refuse-all stub.
+"""``KnowledgeSystem``: ingest wired end to end and the fast-path ``answer``.
 
-Step 7 builds the real index (chunks, table facts, conflicts) and Step 8 adds prose facts and
-row-label verification from the extraction model, cached on disk. The answer path arrives in
-Step 9, so every question is refused until then.
+Step 7 builds the real index (chunks, table facts, conflicts), Step 8 adds prose facts and
+row-label verification from the extraction model (cached on disk), and Step 9 answers from the
+facts with templates. A question that would need the slow path is refused until Step 10.
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ from kk.ingest.prose import ProseExtractor
 from kk.ingest.rowcheck import RowLabelVerifier
 from kk.llm.client import LlmClient, PauseGate, make_client
 from kk.log import get_logger, setup_logging, work_dir_from_env
+from kk.query.answerer import Answerer
+from kk.query.cache import AnswerCache
 from kk.store import Store
 
 # SPEC 12.3 with no linked entity. Contains no digits, so it can never add a number.
@@ -26,7 +28,7 @@ REFUSAL_TEXT = "I couldn't find that information on Dupaco's website. Please con
 
 
 class KnowledgeSystem:
-    """Ingests snapshots into LanceDB; refuses every question until Step 9."""
+    """Ingests snapshots into LanceDB and answers from the stored facts."""
 
     def __init__(
         self,
@@ -71,6 +73,10 @@ class KnowledgeSystem:
             else None
         )
         self.last_summary: IngestSummary | None = None
+        self.answer_cache = AnswerCache(self.config.cache.max_entries)
+        self.answerer = Answerer(
+            self.store, self.embedder, self.config, self._state, self.answer_cache
+        )
 
     @property
     def degraded(self) -> frozenset[tuple[str, str]]:
@@ -88,20 +94,26 @@ class KnowledgeSystem:
         A malformed page is skipped and counted. Only an embedding or store failure raises,
         because the index would be incomplete (SPEC 6.11).
         """
-        self.last_summary = ingest_snapshot(
-            self.store,
-            self.embedder,
-            snapshot,
-            self._state,
-            prose=self._prose,
-            verifier=self._verifier,
-        )
+        try:
+            self.last_summary = ingest_snapshot(
+                self.store,
+                self.embedder,
+                snapshot,
+                self._state,
+                prose=self._prose,
+                verifier=self._verifier,
+            )
+        finally:
+            self.answerer.refresh()  # new linker and an empty cache (CACHE-2), even after a failure
 
     def answer(self, question: str, as_of: str | None = None) -> Answer:
-        """Return the safe refusal (SPEC 12.3). Never raises."""
-        with contextlib.suppress(Exception):  # logging must never break an answer
-            self._log.info("answer", extra={"route": "refusal", "has_as_of": as_of is not None})
-        return Answer(text=REFUSAL_TEXT, sources=[], confident=False)
+        """The fast-path answer, or the safe refusal (SPEC 12.3). Never raises (IF-3)."""
+        try:
+            return self.answerer.answer(question, as_of)
+        except Exception:  # noqa: BLE001 - the harness must always get an Answer
+            with contextlib.suppress(Exception):
+                self._log.exception("answer failed")
+            return Answer(text=REFUSAL_TEXT, sources=[], confident=False)
 
     def conflicts(self) -> list[Conflict]:
         """The records built by the last ingest, with no new analysis (IF-4)."""

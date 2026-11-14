@@ -2,8 +2,8 @@
   "provenance": {
     "retrieval": {"set_by": "SPEC 3 initial value", "dataset": "none (not calibrated)"},
     "confidence": {
-      "set_by": "SPEC 3 placeholder from DESIGN worked examples",
-      "dataset": "none; replaced by the calibration procedure (SPEC 12.4, Step 9)"
+      "set_by": "calibration (make calibrate, SPEC 12.4); report: calibration_report.json",
+      "dataset": "1360 items: 40 public questions plus questions generated from the latest snapshot's table facts (paraphrases, negatives, adversarial); 30% held out by group hash"
     },
     "tier": {"set_by": "SPEC 3 initial value", "dataset": "none (hypothesis, SPEC decision 13)"},
     "llm": {
@@ -21,8 +21,9 @@
   "retrieval": {"top_k": 20, "per_index_k": 40, "rrf_k": 60},
   "confidence": {
     "weights": {"similarity": 0.30, "margin": 0.20, "qualifier": 0.30, "entity": 0.20},
-    "tau_floor": 0.30,
-    "tau_accept": 0.80,
+    "tau_floor": 0.0,
+    "tau_accept": 0.7518,
+    "bm25_bound": 36.0,
     "resolution_state": {"unique": 1.0, "strategy_1_2": 0.9, "strategy_3": 0.7, "unresolved": 0.0}
   },
   "tier": {"default_by_attribute": {"*": "entry"}},

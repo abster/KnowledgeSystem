@@ -88,6 +88,7 @@ All numbers that this spec calls "initial" live in `submission/config.json`, are
 | `confidence.weights` | similarity, margin, qualifier, entity | 0.30, 0.20, 0.30, 0.20 |
 | `confidence.tau_floor` | Relevance floor | 0.30 |
 | `confidence.tau_accept` | Fast-path acceptance | 0.80 |
+| `confidence.bm25_bound` | Upper bound that maps a BM25 score to [0, 1] in the similarity signal (section 12.1) | 20.0 placeholder; set by calibration |
 | `confidence.resolution_state` | unique, strategy 1-2, strategy 3, unresolved | 1.0, 0.9, 0.7, 0.0 |
 | `tier.default_by_attribute` | Default tier selector per attribute | `entry` for all |
 | `llm.slow_model` | Slow-path model | `claude-sonnet-5-5` |
@@ -597,9 +598,9 @@ If the fast answer fails the validators (section 14), or the fast path raises, t
 
 ### 12.4 Calibration procedure
 
-1. **Labelled set.** The 40 public questions; questions generated from the facts table (`What is the {attribute} for {qualifiers}?` and several fixed paraphrase templates, each with the known value as gold); negatives (attributes or qualifiers that do not exist, such as a 7/1 ARM); adversarial questions with unusual modifiers, ranges and terms. Generated items are committed as fixtures in `tests/fixtures/`.
-2. **Split.** Deterministic split by a hash of the item id into a training part (about 70%) and a held-out part (about 30%). Public-question groups (same `group`) stay together.
-3. **Measure.** Compute `c` for each item; label the fast answer correct, wrong, or should-refuse.
+1. **Labelled set.** The 40 public questions; questions generated from the facts table (`What is the {attribute} for {qualifiers}?` and several fixed paraphrase templates, each with the known value as gold); negatives (attributes or qualifiers that do not exist, such as a 7/1 ARM); adversarial questions with unusual modifiers, ranges and terms. Generated items quote site content, so `make calibrate` writes them only under `results/calibration/` (git-ignored); committed tests use synthetic facts, and only numbers and thresholds are committed (decision 29).
+2. **Split.** Deterministic split by a hash of the item's `group` (its id when it has none) into a training part (about 70%) and a held-out part (about 30%). Public-question groups (same `group`) stay together.
+3. **Measure.** Compute `c` for each item (before the hard caps; a capped item never takes the fast path and is left out of precision); label the fast answer correct, wrong, or should-refuse by the eval's own scoring rule. `confidence.bm25_bound` is the largest top-hit BM25 score on the training part, rounded up to 0.5 (decision 30).
 4. **Choose.** `tau_accept` is the lowest value on the training part where fast-path precision is at least the target (initial: 0.97). `tau_floor` is the highest value where at most 2% of answerable items fall below it.
 5. **Report.** Held-out precision and recall, the calibration curve, and the chosen values with provenance, written to `submission/calibration_report.json` and referenced from `config.json`.
 6. **Guard.** If held-out precision is more than 0.03 below training precision, the grammar is narrowed or the thresholds raised before accepting.
@@ -804,11 +805,15 @@ These were chosen while writing the spec because `DESIGN.md` did not settle them
 26. **No temperature; Haiku 5.5 for extraction.** Current models take no sampling parameters on the default API version, so "temperature 0" (PRO-2, SLOW-1, DET-1) cannot be sent to the chosen models. Haiku 5.5 was kept for cost (about $2.70 against about $20 to $27 for Haiku 4.5 at temperature 0 on API version `2023-06-01`, measured in Step 8). Determinism of LLM output comes from the extraction cache only; DESIGN "Model choice and determinism" records the trade-off (the owner chose this in Step 8). Also: a measured extraction call takes about 1.4 s, and 24 parallel workers were rate limited (HTTP 429 and 503 on about 16% of calls), so retries became rate-limit aware (PRO-6, as amended).
 27. **Conflicts use numeric facts only.** After Step 8 added prose facts, the real snapshots gave 482 conflicts, of which 379 were free-text `prose` facts and about 100 more eligibility, address, status, count, phone and hours text; only 3 were numeric. Several different sentences about one entity share one fact key (entity, attribute, no qualifiers), which is not a contradiction. Detection now keeps only facts with a numeric value (the owner chose this in Step 8). Costs: a planted contradiction in a text fact (for example two different opening hours) is not reported.
 28. **Row labels drop apostrophes.** `Investor's Choice` becomes `Investors Choice`, not `Investor s Choice` (found in Step 8 when the row-label verifier rejected such rows). Other punctuation still separates words.
+29. **Calibration data stays local.** Generated calibration questions quote entity labels and values from the snapshots, so they are written only to git-ignored `results/calibration/`; the committed artefacts are `calibration_report.json` (numbers only) and `config.json`. Changes 12.4 step 1, which said to commit them as fixtures (the owner chose this in Step 9, following CLAUDE.md and the test data policy).
+30. **BM25 bound.** The similarity signal needs an upper bound for BM25 scores; it is the new key `confidence.bm25_bound`, set by calibration as the largest top-hit score on the training part, rounded up to 0.5 (the owner chose this in Step 9).
+31. **No fast-path wording for `status` and `list` in Step 9.** A `status` fact has no stored phrase or date semantics that the template could use, and a list's completeness is not proven, so those questions hit hard caps 2 and 4 and wait for the slow path (refused until Step 10). A narrowing, not a widening, of SPEC 8.7 GR-2.
+32. **Conflict note wording.** `strategy=<name>: <winner> used; <loser values> superseded`, built from the winning group at the target ordinal (CA-1); only a resolved conflict gets one.
+33. **A generic "rate" question.** The attributes `rate`, `apy` and `apr` are tried in that order; the qualifier match counts only an exact attribute, so "rate" answered by an APY alone scores low and goes to the slow path (observed on deposit rows, kept: precision first).
 
 ## 22. Deferred to the implementation plan
 
 * Exact `bge-small-en-v1.5` weight packaging and size (Step 7: fastembed's quantised ONNX build, about 64 MB, fetched once with `make fetch-model` into `submission/models/`).
-* The BM25 upper bound used in the similarity signal.
 * The measured ingest time and the extraction cache size.
 * Entity names for prose facts: the model names one product differently on different pages ("6 month certificate", "certificates"), so equal facts get different fact keys and some contradictions are missed (found in Step 8; the selftest conflict is one). To be settled in Step 9 together with entity linking.
 * The URL survey behind the authority rules.

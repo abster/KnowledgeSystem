@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kk.ingest.aliases import build_aliases, canonical_id
 
 
@@ -51,3 +53,34 @@ def test_empty_and_blank_labels_are_ignored() -> None:
     index = build_aliases(["", "   ", "Share Savings"])
     assert index.resolve("") is None
     assert index.resolve("share savings") == "share savings"
+
+
+# --- plurals (Step 6 open item: `branchs` and `saving` never linked) -------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "plural"),
+    [
+        ("Branch", "branches"),
+        ("Lobby", "lobbies"),
+        ("Class", "classes"),
+        ("Mortgage", "mortgages"),
+        ("Certificate", "certificates"),
+        ("Box", "boxes"),
+        ("Share Savings", "share savings"),
+    ],
+)
+def test_a_regular_plural_of_the_label_links(label: str, plural: str) -> None:
+    index = build_aliases([label])
+    assert index.resolve(plural) == label.lower()
+
+
+def test_a_wrong_plural_form_is_not_an_alias() -> None:
+    index = build_aliases(["Branch", "Lobby"])
+    assert "branchs" not in index.aliases
+    assert "lobbys" not in index.aliases
+
+
+def test_the_plural_label_links_to_its_singular() -> None:
+    assert build_aliases(["Branches"]).resolve("branch") == "branches"
+    assert build_aliases(["Lobbies"]).resolve("lobby") == "lobbies"

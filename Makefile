@@ -4,7 +4,7 @@ RUN ?= local
 UV ?= uv run
 
 .PHONY: verify lint format-check types security test build gate eval eval-selftest \
-	export-requirements check-key coverage-report fetch-model
+	export-requirements check-key coverage-report fetch-model calibrate
 
 verify: lint format-check types security test build gate
 
@@ -51,3 +51,8 @@ coverage-report:
 
 fetch-model:
 	PYTHONPATH=submission:harness $(UV) python tools/fetch_model.py
+
+# Choose tau_floor and tau_accept on the training split and report the held-out split (SPEC 12.4).
+# Add APPLY=--apply to write submission/config.json and submission/calibration_report.json.
+calibrate:
+	PYTHONPATH=submission:harness:. $(UV) python -m tools.calibrate $(APPLY)

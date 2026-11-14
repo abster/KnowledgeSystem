@@ -40,12 +40,31 @@ def _without_stop_words(entity: str) -> str:
     return " ".join(word for word in entity.split() if word not in STOP_WORDS)
 
 
-def _toggle_plural(phrase: str) -> str:
+def _plural_variants(phrase: str) -> set[str]:
+    """The singular or plural twins of ``phrase`` (only its last word changes).
+
+    A phrase that ends in ``s`` may be a plural (``branches``, ``lobbies``, ``mortgages``) or a
+    singular (``class``, ``savings``), so every plausible twin is returned; one that matches no
+    entity is harmless. A singular gets only its regular plural, so ``branchs`` is never made.
+    """
     if not phrase:
-        return phrase
-    if phrase.endswith("s") and not phrase.endswith("ss") and len(phrase) >= _PLURAL_MIN_LEN:
-        return phrase[:-1]
-    return phrase + "s"
+        return set()
+    twins: set[str] = set()
+    if phrase.endswith("ss"):
+        twins.add(phrase + "es")
+    elif phrase.endswith("s") and len(phrase) >= _PLURAL_MIN_LEN:
+        twins.add(phrase[:-1])
+        if phrase.endswith(("ses", "xes", "zes", "ches", "shes")):
+            twins.add(phrase[:-2])
+        if phrase.endswith("ies") and len(phrase) > _PLURAL_MIN_LEN:
+            twins.add(phrase[:-3] + "y")
+    elif phrase.endswith(("x", "z", "ch", "sh")):
+        twins.add(phrase + "es")
+    elif phrase.endswith("y") and len(phrase) > 1 and phrase[-2] not in "aeiou ":
+        twins.add(phrase[:-1] + "ies")
+    else:
+        twins.add(phrase + "s")
+    return twins
 
 
 def _swap_abbreviations(phrase: str) -> set[str]:
@@ -68,7 +87,7 @@ def _aliases_of(entity: str) -> set[str]:
         bases.add(stripped)
     found = set(bases)
     for base in bases:
-        found.add(_toggle_plural(base))
+        found |= _plural_variants(base)
         found |= _swap_abbreviations(base)
     return {alias for alias in found if alias}
 

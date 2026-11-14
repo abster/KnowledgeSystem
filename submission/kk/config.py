@@ -61,6 +61,7 @@ class Confidence(_Section):
     weights: Weights
     tau_floor: float = Field(ge=0, le=1)
     tau_accept: float = Field(ge=0, le=1)
+    bm25_bound: float = Field(gt=0)  # upper bound that maps a BM25 score to [0, 1] (SPEC 12.1)
     resolution_state: ResolutionState
 
     @model_validator(mode="after")

@@ -58,3 +58,35 @@ def test_both_selftest_snapshots_ingest_and_as_of_filters_a_direct_store_query(
     )
     ordinal = target_ordinal("2026-02-01", ks.store.snapshots).ordinal
     assert ordinal == 1
+
+
+def test_every_selftest_question_gets_an_answer_and_the_refusal_item_is_refused(
+    work_dir: Path,
+) -> None:
+    """Routing end to end on the provided selftest data (SPEC 19.2, Step 9).
+
+    The selftest facts are plain text, so without prose extraction (no key here) the fast path
+    has nothing to answer from; what must hold is that nothing raises, no refusal states a new
+    number, and the item that must be refused is refused.
+    """
+    ks = KnowledgeSystem(embedder=FakeEmbedder())
+    for snap in _load():
+        ks.ingest(snap)
+    rows = [
+        json.loads(line)
+        for line in (SELFTEST.parent / "eval.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert rows
+    for row in rows:
+        answer = ks.answer(row["question"], row.get("as_of"))
+        assert isinstance(answer.text, str)
+        if answer.confident is False:
+            assert answer.sources == []
+            digits = set("0123456789")
+            assert (set(answer.text) & digits) <= (set(row["question"]) & digits)
+        if row["category"] == "should_refuse":
+            assert answer.confident is False
+    before_first = ks.answer("What is the 6-month certificate APY?", "2026-01-01")
+    assert before_first.confident is False
+    assert before_first.sources == []

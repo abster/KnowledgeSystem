@@ -25,7 +25,9 @@ from kk.query.question import parse
 from tests.fixtures.facts import make_fact
 from tests.fixtures.questions import LINKER
 
-CFG = load_config().confidence
+# The DESIGN worked examples and the routing table are stated for the SPEC 3 placeholder
+# thresholds, so the tests pin them; the shipped values come from `make calibrate`.
+CFG = load_config().confidence.model_copy(update={"tau_floor": 0.30, "tau_accept": 0.80})
 CLEAR = CapInputs(
     parse_ok=True,
     has_template=True,
