@@ -337,7 +337,15 @@ Until the fast path exists, `answer()` is the refuse-all stub from step 2, so Ev
 * Packaging: weights in `submission/models/`, the extraction cache in `submission/cache/`, `requirements.txt` exported, `NOTES.md` (keys, how to run, the no-key limitation, known limits), and `README.md` run instructions.
 * A no-key run (the key unset) against the shipped cache, to prove SPEC AC-8.
 
-**Out of scope.** New features.
+**Out of scope.** New features. The items in "Carried over from earlier steps" below are not new features: they were found in Steps 8 and 9 and belong to this step.
+
+**Carried over from earlier steps.** Details are in the Step 8 and Step 9 entries of `PROGRESS.md` and in SPEC decisions 26 to 33.
+* **Owner decision first, then work: the lexicon review.** Step 9 left Eval A at 0.093 because the fast path answers none of the 40 public questions (2 are fast-eligible, 20 have no linked entity, 18 have blocking words). The neutral-word, measure-word and change-cue lists set the width of the fast path (SPEC decision 8, reviewed at the first calibration run, which is now). Candidates: the word `balances` (the renderer's own phrase for balance bands, 726 of 1,320 generated questions blocked), spelled-out numbers (`six month`), and heading-only entities such as `mortgage` (Step 4 open item, a rule change). Do not change any list or rule on your own: report the blockers by count, propose the changes with alternatives, and let the owner choose. Take proposals from generated and synthetic questions, never from the public ones. After any change, re-run `make calibrate` and report public and held-out figures together.
+* **Routing.** `tau_floor` is 0.0 (the SPEC 12.4 rule's output; the owner kept it). Step 9 refuses a question with no candidate fact directly; with a floor of 0.0 it must go to the slow path, which reads raw chunks. Once the slow path exists, re-set `tau_floor` from measured slow-path results (how often it answers correctly or invents, per score range) and ask the owner before changing it.
+* **Fast-path wording.** `status` and `list` questions have no fast-path template (SPEC decision 31) and go to the slow path.
+* **Slow path mechanics (from Step 8).** Sonnet 5.5 rejects a forced `tool_choice`, so use structured outputs; ship `submission/cache/extraction/` (git-ignored) inside the submission; a cold ingest at 8 workers is estimated at about 55 minutes against the 25-minute target, so measure a higher concurrency with the rate-limit-aware retries if the shipped cache could miss.
+* **Evaluation.** Public accuracy stays at 0.093 until the lexicon review or the slow path widens what gets answered, so the end-to-end held-out comparison (AC-14) is first meaningful here. Update `tests/eval_baseline.json` in this step, after approval. The prose entity naming problem (one product named differently on each page, so equal facts get different keys and some conflicts are missed) is still deferred; raise it as drift if it limits the result.
+* **Local-only diagnostics.** `results/` is git-ignored. The calibration run writes `results/calibration/items.jsonl` (question text, local only); regenerate it with `make calibrate`.
 
 **Tests.**
 * Fake client: accepted answer, `answerable=false`, unknown evidence id, validator failure, timeout, rate limit then success, deadline exceeded, no key.
