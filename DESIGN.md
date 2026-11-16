@@ -14,7 +14,7 @@
 
 * Accuracy - 55% of the score; target >78% on `public_eval.jsonl` (the original target was >90%; it was lowered by the owner after Step 10 measured 0.79 to 0.84 over repeated runs, and two public questions are disputed, see PROGRESS.md). Repeating a stale or wrong-tier value scores zero for that question, so correctness of the resolved value matters more than answer completeness. This is the primary optimisation target and wins every trade-off against speed.
 * Consistency - Reworded questions (same `group`) and repeated questions must produce the same values. Achieved by determinism (answers rendered from resolved facts, canonical-key cache, LLM results cached by content), not by luck. The models take no temperature (see "Model choice and determinism"), so determinism of LLM calls comes from the cache.
-* Latency - Speed is 15% and multiplied by accuracy. Goal: P99 of 1–2 s on the common path (fast path + cache). The slow path may take longer: hard ceiling 20 s (speed score reaches 0 there; harness limit is 60 s). Treat this as a soft goal, since accuracy is worth more than speed. Ingest takes minutes (target <5 min, hard limit 30 min), and ingest time is not scored.
+* Latency - Speed is 15% and multiplied by accuracy. The original goal was a P99 of 1–2 s on the common path (fast path + cache). It was relaxed by the owner after Step 10 because accuracy is worth more than speed: the target is now that every answer finishes under the 20 s hard ceiling (the speed score reaches 0 there; the harness limit is 60 s), with the slow-path deadline at 15 s. Measured on the public eval (Step 10, five clean runs): all 40 questions went to the slow path, because the fast path's full-coverage check refuses most real wording, so p50 was 6.8 to 7.4 s, p95 8.1 to 10.5 s and the slowest answer 10.3 to 12.4 s; the speed score was about 0.53 to 0.66. The fast-path decision stage itself takes a median of 129 ms (slowest 247 ms), so a question the fast path does answer would be fast, but none of the public questions is one. Two runs had stalls far above the deadline (one with a full disk, one of 115 s that was not explained), which the 15 s deadline did not prevent. Ingest takes minutes (target <5 min, hard limit 30 min), and ingest time is not scored.
 * Availability/Failure Handling - Never raise from `answer()`. A missing API key, LLM timeout, rate limit or malformed LLM output degrades to the fast-path answer (non-confident when the evidence is weak). The system runs fully in-process with no server dependency, so there are no network dependencies other than the optional LLM. Ingest-time LLM extraction is cached on disk, so a rerun or a partial failure resumes cheaply.
 * Scalability - ~700 pages × 5 snapshots, deduplicated to ≈5–15k chunks. This design is sized for that dataset, not for millions of documents. If the corpus grew by orders of magnitude, the embedded store would be swapped for a server vector DB (see Vector Database).
 * Reproducibility - The same snapshots produce the same index and the same answers. LLM outputs used at ingest are cached by content hash. Current models accept no sampling parameters, so a cache miss or a changed prompt can give different LLM output (see "Model choice and determinism").
@@ -647,12 +647,12 @@ Coverage thresholds (pytest-cov) apply to the extraction, resolution and as_of p
 
 * Tests run with `python -X dev -W error` so warnings (resource leaks, deprecated calls) fail the build.
 * `memray` records peak memory of ingest on the real snapshots; the budget must fit comfortably in 8 GB.
-* A latency test runs the public eval and asserts fast-path P95 stays under budget.
+* The eval gate runs the public eval and fails if p95 is more than 0.5 s worse than the recorded baseline (the slow path dominates p95; see Non-functional Requirements).
 * `cProfile` output is archived when a latency regression is flagged.
 
 ### Build and verify
 
-`make verify` runs in this order and fails fast: ruff check → ruff format --check → mypy → bandit + pip-audit → pytest with coverage → `python -m build` → public-eval gate (accuracy must not regress; latency within budget). The same target runs locally and inside Docker.
+`make verify` runs in this order and fails fast: ruff check → ruff format --check → mypy → bandit + pip-audit → pytest with coverage → `python -m build` → public-eval gate (accuracy must not regress; p95 within 0.5 s of the baseline). The same target runs locally and inside Docker.
 
 ### Docker and Docker Compose
 

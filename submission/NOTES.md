@@ -49,7 +49,12 @@ To rebuild this folder from the repository: `make package` writes `dist/submissi
 * Ingest of all five snapshots with the shipped cache and the embedding cache: about a minute;
   without the vector cache about 8 to 10 minutes. With no extraction cache and a key the first
   ingest takes much longer (tens of minutes at 8 workers); the cache removes that cost.
-* Fast path: well under a second. Slow path: a few seconds, never more than 15 s.
+* Fast path: the decision stage takes about 0.13 s (median), but real wording rarely passes its
+  coverage check, so on the public questions every answer takes the slow path: median about 7 s,
+  p95 8 to 10.5 s, slowest 10 to 12 s over five runs. The slow-path deadline is 15 s (one retry)
+  and the speed score reaches zero at 20 s. Latency was traded for accuracy on purpose. Two runs
+  showed stalls far above the deadline (one with a full disk, one of 115 s of unknown cause), so
+  the deadline is a target and not a hard guarantee.
 
 ## How the slow path reads the site
 
