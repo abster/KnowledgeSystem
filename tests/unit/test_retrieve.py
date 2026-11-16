@@ -11,13 +11,30 @@ from kk.config import Retrieval, load_config
 from kk.ingest.aliases import build_aliases
 from kk.ingest.dedupe import make_chunk_id
 from kk.query.question import EntityLinker, parse
-from kk.query.retrieve import RankedChunk, candidate_facts, fuse, max_rrf, retrieve
+from kk.query.retrieve import (
+    RankedChunk,
+    candidate_facts,
+    dedupe_hits,
+    fuse,
+    max_rrf,
+    retrieve,
+    retrieve_deep,
+)
 from kk.store import Store, StoredHit
 from kk.types import Chunk, Fact, SnapshotRef
 from tests.fixtures.embedder import FakeEmbedder
 from tests.fixtures.facts import make_fact
 
-CFG = Retrieval(top_k=3, per_index_k=40, rrf_k=60)
+CFG = Retrieval(
+    top_k=3,
+    per_index_k=40,
+    rrf_k=60,
+    slow_top_k=9,
+    slow_per_index_k=90,
+    slow_pool_k=400,
+    rerank_candidates=50,
+    rerank_keep=10,
+)
 
 
 def _hit(chunk_id: str, score: float, first: int = 1) -> StoredHit:
@@ -287,3 +304,56 @@ def test_no_hits_means_no_candidates(tmp_path: Path) -> None:
     store = Store(tmp_path / "lance", max_batch_chars=8000)
     parsed = parse("What is the certificate APY?", _linker(), target_ord=1)
     assert candidate_facts(store, [], parsed, target_ord=1, rrf_k=60, snapshots=()) == []
+
+
+# --- boilerplate collapse for the slow path (SRET-4) -----------------------------------------
+
+
+def _text_hit(chunk_id: str, text: str, url: str = "https://example.test/p") -> StoredHit:
+    base = _hit(chunk_id, 1.0)
+    return replace(base, chunk=replace(base.chunk, text=text, url=url))
+
+
+def test_identical_text_on_several_pages_is_kept_once_at_its_best_rank() -> None:
+    hits = [
+        _text_hit("a", "Becoming a  Dupaco member", "https://example.test/1"),
+        _text_hit("b", "becoming a dupaco MEMBER", "https://example.test/2"),
+        _text_hit("c", "You live or work in the charter area."),
+    ]
+    assert [h.chunk.chunk_id for h in dedupe_hits(hits, 10)] == ["a", "c"]
+
+
+def test_dedupe_stops_at_the_limit_and_keeps_the_order() -> None:
+    hits = [_text_hit(f"id{i}", f"text {i}") for i in range(6)]
+    assert [h.chunk.chunk_id for h in dedupe_hits(hits, 3)] == ["id0", "id1", "id2"]
+
+
+def test_empty_text_is_never_collapsed_with_another_empty_chunk() -> None:
+    hits = [_text_hit("a", ""), _text_hit("b", "")]
+    assert len(dedupe_hits(hits, 5)) == 2
+
+
+def test_deep_retrieval_reaches_a_chunk_that_copies_of_boilerplate_pushed_down(
+    tmp_path: Path,
+) -> None:
+    embedder = FakeEmbedder()
+    store = Store(tmp_path / "lance", max_batch_chars=8000)
+    boiler = "Becoming a Dupaco member today"
+    copies = [_chunk(boiler, url=f"https://e.test/{i}", kind="paragraph") for i in range(30)]
+    target = _chunk(
+        "Becoming a Dupaco member needs you to live or work in the charter area",
+        url="https://e.test/join",
+        kind="paragraph",
+    )
+    store.add_snapshot(
+        SnapshotRef(ordinal=1, snapshot_id="s1", taken_on="2026-01-01"),
+        [*copies, target],
+        [],
+        embedder,
+    )
+    cfg = CFG.model_copy(update={"top_k": 5, "per_index_k": 5, "slow_pool_k": 100})
+    shallow = {h.chunk_id for h in retrieve(store, embedder, boiler, 1, cfg)}
+    deep = retrieve_deep(store, embedder, boiler, 1, cfg)
+    assert target.chunk_id not in shallow
+    assert target.chunk_id in {h.chunk_id for h in deep}
+    assert len([h for h in deep if h.chunk.text == boiler]) == 1

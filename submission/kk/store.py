@@ -474,6 +474,37 @@ class Store:
         rows = self._rows(self._chunks, where, _CHUNK_COLUMNS)
         return _chunk_from_row(rows[0]) if rows else None
 
+    def page_chunks(self, url: str, target_ord: int) -> list[Chunk]:
+        """Every chunk of the page at ``url`` visible at ``target_ord``, in page order."""
+        where = f"url = {_quote(url)} AND {_visible(target_ord)}"
+        rows = self._rows(self._chunks, where, _CHUNK_COLUMNS)
+        return sorted((_chunk_from_row(r) for r in rows), key=lambda c: (c.position, c.chunk_id))
+
+    def page_heads(
+        self, urls: Sequence[str], target_ord: int, *, limit: int
+    ) -> dict[str, list[str]]:
+        """The texts of the first ``limit`` chunks of each page, by url, visible at ``target_ord``.
+
+        One query for many pages; used to read the byline date of news pages (SRET-5).
+        """
+        heads: dict[str, list[Chunk]] = {}
+        for batch in _batches(sorted(set(urls))):
+            where = (
+                f"url IN ({_in_list(batch)}) AND position < {int(limit)} AND {_visible(target_ord)}"
+            )
+            for row in self._rows(self._chunks, where, _CHUNK_COLUMNS):
+                chunk = _chunk_from_row(row)
+                heads.setdefault(chunk.url, []).append(chunk)
+        return {
+            url: [c.text for c in sorted(found, key=lambda c: (c.position, c.chunk_id))]
+            for url, found in heads.items()
+        }
+
+    def table_chunks(self, target_ord: int) -> list[Chunk]:
+        """Every parent table chunk visible at ``target_ord``."""
+        where = f"chunk_type = 'table' AND {_visible(target_ord)}"
+        return [_chunk_from_row(r) for r in self._rows(self._chunks, where, _CHUNK_COLUMNS)]
+
     def intervals_of(self, chunk_id: str) -> list[StoredInterval]:
         """Every interval row of ``chunk_id``, oldest first."""
         rows = self._rows(self._chunks, f"chunk_id = {_quote(chunk_id)}", _CHUNK_COLUMNS)

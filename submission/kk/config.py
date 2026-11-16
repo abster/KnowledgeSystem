@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -35,6 +36,11 @@ class Retrieval(_Section):
     top_k: int = Field(gt=0)
     per_index_k: int = Field(gt=0)
     rrf_k: int = Field(gt=0)
+    slow_top_k: int = Field(gt=0)  # chunks the slow path reads (SPEC 13.1)
+    slow_per_index_k: int = Field(gt=0)
+    slow_pool_k: int = Field(gt=0)  # rows read from each search before boilerplate is collapsed
+    rerank_candidates: int = Field(gt=0)  # fused candidates shown to the reranker
+    rerank_keep: int = Field(gt=0)  # candidates the reranker may pick
 
 
 class Weights(_Section):
@@ -88,6 +94,7 @@ class Llm(_Section):
     slow_model: str = Field(min_length=1)
     extract_model: str = Field(min_length=1)
     slow_deadline_s: int = Field(gt=0)
+    slow_effort: Literal["low", "medium", "high"]  # reasoning depth of the slow call
     extract_concurrency: int = Field(gt=0)
 
 

@@ -7,11 +7,12 @@ SDK's text, so the API key cannot reach a log through an error.
 
 from __future__ import annotations
 
+import json
 import math
 import threading
 import time
 from collections.abc import Callable, Mapping
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 import anthropic
 
@@ -96,6 +97,29 @@ class LlmClient(Protocol):
         ...
 
 
+@runtime_checkable
+class StructuredLlmClient(Protocol):
+    """One call whose reply is JSON constrained by a schema (the slow model, Step 10).
+
+    The slow model rejects a forced ``tool_choice``, so the schema goes in
+    ``output_config.format`` and the JSON comes back as text.
+    """
+
+    def call_structured(  # noqa: PLR0913
+        self,
+        *,
+        model: str,
+        system: str,
+        user: str,
+        schema: Mapping[str, Any],
+        max_tokens: int,
+        timeout_s: float,
+        effort: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the JSON object, or raise an :class:`LlmError`."""
+        ...
+
+
 def call_with_retries(
     client: LlmClient,
     *,
@@ -157,6 +181,20 @@ class AnthropicClient:
         """Never shows the SDK client, which holds the key."""
         return "AnthropicClient()"
 
+    def _create(self, **request: Any) -> Any:  # noqa: ANN401
+        """``messages.create`` with every failure mapped to an :class:`LlmError`."""
+        try:
+            return self._sdk.messages.create(**request)
+        except (anthropic.APITimeoutError, anthropic.APIConnectionError) as exc:
+            raise LlmTransientError(type(exc).__name__) from exc
+        except anthropic.APIStatusError as exc:
+            message = f"HTTP {exc.status_code}"
+            if exc.status_code == _RATE_LIMIT or exc.status_code >= _SERVER_ERROR:
+                raise LlmTransientError(message, retry_after_seconds(exc)) from exc
+            raise LlmError(message) from exc
+        except anthropic.AnthropicError as exc:
+            raise LlmError(type(exc).__name__) from exc
+
     def call_json(  # noqa: PLR0913
         self,
         *,
@@ -169,31 +207,21 @@ class AnthropicClient:
         timeout_s: float,
     ) -> dict[str, Any]:
         """Force one tool call and return its input."""
-        try:
-            response = self._sdk.messages.create(
-                model=model,
-                system=system,
-                messages=[{"role": "user", "content": user}],
-                tools=[
-                    {
-                        "name": tool_name,
-                        "description": "Record the result.",
-                        "input_schema": dict(schema),
-                    }
-                ],
-                tool_choice={"type": "tool", "name": tool_name},
-                max_tokens=max_tokens,
-                timeout=timeout_s,
-            )
-        except (anthropic.APITimeoutError, anthropic.APIConnectionError) as exc:
-            raise LlmTransientError(type(exc).__name__) from exc
-        except anthropic.APIStatusError as exc:
-            message = f"HTTP {exc.status_code}"
-            if exc.status_code == _RATE_LIMIT or exc.status_code >= _SERVER_ERROR:
-                raise LlmTransientError(message, retry_after_seconds(exc)) from exc
-            raise LlmError(message) from exc
-        except anthropic.AnthropicError as exc:
-            raise LlmError(type(exc).__name__) from exc
+        response = self._create(
+            model=model,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            tools=[
+                {
+                    "name": tool_name,
+                    "description": "Record the result.",
+                    "input_schema": dict(schema),
+                }
+            ],
+            tool_choice={"type": "tool", "name": tool_name},
+            max_tokens=max_tokens,
+            timeout=timeout_s,
+        )
         for block in response.content:
             if (
                 getattr(block, "type", None) == "tool_use"
@@ -204,6 +232,43 @@ class AnthropicClient:
                     raise LlmOutputError("tool input is not an object")
                 return dict(data)
         raise LlmOutputError("no tool call in the response")
+
+    def call_structured(  # noqa: PLR0913
+        self,
+        *,
+        model: str,
+        system: str,
+        user: str,
+        schema: Mapping[str, Any],
+        max_tokens: int,
+        timeout_s: float,
+        effort: str | None = None,
+    ) -> dict[str, Any]:
+        """One call with ``output_config.format``; the reply text is the JSON object."""
+        output_config: dict[str, Any] = {"format": {"type": "json_schema", "schema": dict(schema)}}
+        if effort is not None:
+            output_config["effort"] = effort
+        response = self._create(
+            model=model,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            output_config=output_config,
+            max_tokens=max_tokens,
+            timeout=timeout_s,
+        )
+        stop = getattr(response, "stop_reason", None)
+        if stop in ("refusal", "max_tokens"):
+            raise LlmOutputError(f"stop reason {stop}")
+        text = next((b.text for b in response.content if getattr(b, "type", None) == "text"), None)
+        if text is None:
+            raise LlmOutputError("no text in the response")
+        try:
+            data = json.loads(text)
+        except ValueError as exc:
+            raise LlmOutputError("reply is not JSON") from exc
+        if not isinstance(data, dict):
+            raise LlmOutputError("reply is not an object")
+        return data
 
 
 def make_client() -> LlmClient | None:

@@ -85,11 +85,25 @@ _HTML_TAG = re.compile(r"<[^>]*>")
 _BR_TAG = re.compile(r"<br\s*/?>", re.IGNORECASE)
 
 
-def _inline_text(token: Token) -> str:
-    """Plain text of an inline token: tags dropped, image alt and link text kept."""
+def _inline_text(token: Token, *, links: bool = False) -> str:
+    """Plain text of an inline token: tags dropped, image alt and link text kept.
+
+    With ``links`` a link's target follows its text, as ``text (target)``, so that a question
+    about where to go can be answered from the page. A target that repeats the text, or that is
+    only a fragment, is not added. Headings and table cells do not ask for it.
+    """
     parts: list[str] = []
+    targets: list[str | None] = []
     for child in token.children or []:
-        if child.type in {"text", "code_inline"}:
+        if child.type == "link_open":
+            href = str(child.attrGet("href") or "").strip()
+            targets.append(href if links and href and not href.startswith("#") else None)
+        elif child.type == "link_close":
+            target = targets.pop() if targets else None
+            shown = "".join(parts).rstrip()
+            if target is not None and not shown.endswith(target):
+                parts.append(f" ({target})")
+        elif child.type in {"text", "code_inline"}:
             parts.append(child.content)
         elif child.type in {"softbreak", "hardbreak"}:
             parts.append(" ")
@@ -134,7 +148,7 @@ def _list_block(tokens: list[Token], start: int, end: int) -> ListBlock:
                 items.append(clean_text(" ".join(current)))
             current = None
         elif token.type == "inline" and current is not None:
-            current.append(_inline_text(token))
+            current.append(_inline_text(token, links=True))
     return ListBlock(tuple(item for item in items if item), ordered)
 
 
@@ -189,7 +203,7 @@ def _blocks(tokens: list[Token]) -> list[Block]:  # noqa: PLR0912 - one branch p
                 blocks.append(Heading(int(token.tag[1:_HEADING_TAG_LEN]), text))
             step = 3
         elif token.type == "paragraph_open":
-            text = _inline_text(tokens[index + 1])
+            text = _inline_text(tokens[index + 1], links=True)
             if text:
                 blocks.append(Paragraph(text))
             step = 3

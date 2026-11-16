@@ -4,9 +4,9 @@ RUN ?= local
 UV ?= uv run
 
 .PHONY: verify lint format-check types security test build gate eval eval-selftest \
-	export-requirements check-key coverage-report fetch-model calibrate
+	export-requirements check-key coverage-report fetch-model calibrate package cleanroom heldout-generate heldout
 
-verify: lint format-check types security test build gate
+verify: lint format-check types security test build package gate
 
 lint:
 	$(UV) ruff check .
@@ -41,6 +41,22 @@ eval-selftest:
 
 export-requirements:
 	uv export --no-dev --no-hashes --no-emit-project -o submission/requirements.txt
+
+# Assemble the hand-in (code, weights, extraction cache) in dist/submission and dist/submission.zip.
+package: export-requirements
+	$(UV) python tools/package.py
+
+# Fresh virtualenv, no key, no network: build, ingest and answer from the package only (AC-8).
+cleanroom:
+	$(UV) python tools/cleanroom.py
+
+# Held-out questions written from the raw pages (local files under results/heldout/).
+heldout-generate:
+	PYTHONPATH=submission:harness:. $(UV) python -m tools.heldout generate
+
+PART ?= dev
+heldout:
+	PYTHONPATH=submission:harness:. $(UV) python -m tools.heldout run --part $(PART)
 
 check-key:
 	PYTHONPATH=submission:harness $(UV) python -m kk.llm.check_key

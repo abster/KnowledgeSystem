@@ -63,7 +63,7 @@ def test_footnote_digits_in_headers_are_kept_for_step_four() -> None:
 def test_html_removed_and_image_alt_and_link_text_kept() -> None:
     md = "Hello <b>bold</b> world<br>next ![Alt text](http://x.test/y.png) [link](http://u.test)\n"
     (para,) = parse_markdown(md)
-    assert para == Paragraph("Hello bold world next Alt text link")
+    assert para == Paragraph("Hello bold world next Alt text link (http://u.test)")
 
 
 def test_html_block_text_is_kept_without_tags() -> None:
@@ -91,3 +91,27 @@ def test_empty_page_is_skipped(markdown: str) -> None:
 def test_oversized_page_is_skipped() -> None:
     with pytest.raises(ParseError):
         parse_markdown("a" * (5 * 1024 * 1024 + 1))
+
+
+def test_a_link_in_a_paragraph_keeps_its_target_after_the_text() -> None:  # ING-5 (links)
+    (para,) = parse_markdown("[Open a savings account](https://join.example.test/p?x=1)\n")
+    assert para == Paragraph("Open a savings account (https://join.example.test/p?x=1)")
+
+
+def test_a_link_in_a_list_item_keeps_its_target() -> None:
+    (lst,) = parse_markdown("- See [rates](/personal/rates) today\n")
+    assert lst.items == ("See rates (/personal/rates) today",)
+
+
+def test_links_in_headings_and_table_cells_stay_plain_text() -> None:
+    blocks = parse_markdown(
+        "# [Title](http://h.test)\n\n| A | B |\n| - | - |\n| [x](http://c.test) | 3.50% |\n"
+    )
+    assert blocks[0].text == "Title"  # type: ignore[union-attr]
+    table = next(b for b in blocks if isinstance(b, TableBlock))
+    assert table.rows[0] == ("x", "3.50%")
+
+
+def test_no_target_is_added_when_it_repeats_the_text_or_is_only_a_fragment() -> None:
+    (para,) = parse_markdown("[http://same.test](http://same.test) and [top](#top)\n")
+    assert para == Paragraph("http://same.test and top")

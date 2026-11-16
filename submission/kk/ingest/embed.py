@@ -8,6 +8,7 @@ command that downloads the weights once).
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
@@ -108,6 +109,18 @@ def _batches(texts: Sequence[str], max_batch_chars: int) -> list[list[int]]:
     return batches
 
 
+_LINK_TARGET = re.compile(r"\s\((?:https?://|/|mailto:|tel:)[^\s)]*\)")
+
+
+def strip_link_targets(text: str) -> str:
+    """The text without the ``(target)`` that the parser adds after a link (decision 37).
+
+    Targets help an answer ("where do I join?") but a long URL in the embedded text moves the
+    vector away from the words of the page, so the embedding sees the text alone.
+    """
+    return _LINK_TARGET.sub("", text)
+
+
 def embed_in_batches(
     embedder: EmbedderLike, texts: Sequence[str], *, max_batch_chars: int
 ) -> np.ndarray:
@@ -127,7 +140,7 @@ def embed_in_batches(
         return np.zeros((0, DIM), dtype=np.float32)
     result = np.zeros((len(texts), DIM), dtype=np.float32)
     for positions in _batches(texts, max_batch_chars):
-        batch = [texts[i] for i in positions]
+        batch = [strip_link_targets(texts[i]) for i in positions]
         try:
             rows = embedder.embed_documents(batch)
         except Exception:  # noqa: BLE001 - any model failure is retried once

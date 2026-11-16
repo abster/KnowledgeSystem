@@ -1,9 +1,10 @@
 """The fast-path answer pipeline (SPEC 8 to 12, 14, 16).
 
 Stages, each in its own error boundary: ``as_of``, parse, cache lookup, retrieval, candidate
-facts, sibling selection, template, confidence and routing, validators. Before Step 10 there
-is no slow path, so a question routed to it is refused (decision D10). The same refusal covers
-every failure: a raising stage, a validator failure and a score below the floor.
+facts, sibling selection, template, confidence and routing, validators. A question routed to
+the slow path, a fast answer that fails the validators and a stage that raises after retrieval
+all go to the slow path (SPEC 12.2, 16); without a client, or if the slow answer is not
+accepted, the result is the safe refusal.
 
 ``Answerer.evaluate`` reports the whole story (route, confidence, caps, the answer the fast
 path would give); calibration reads it. ``answer`` returns only the ``Answer`` and never raises.
@@ -59,17 +60,45 @@ from kk.query.render import (
     render_rate,
     safe_refusal,
 )
-from kk.query.retrieve import CandidateGroup, RankedChunk, candidate_facts, retrieve
+from kk.query.rerank import Reranker
+from kk.query.retrieve import (
+    CandidateGroup,
+    RankedChunk,
+    candidate_facts,
+    fuse_rankings,
+    retrieve,
+    retrieve_deep,
+)
+from kk.query.rewrite import QueryRewriter
+from kk.query.slow import (
+    STALE_STRATEGIES,
+    ParentChunk,
+    SlowInputs,
+    SlowPath,
+    SlowRequest,
+    build_request,
+    history_view,
+    loser_numbers,
+    loser_scopes,
+    published_date,
+    stale_tables_detail,
+    superseded_detail,
+)
 from kk.query.validators import (
+    Number,
     ValidationContext,
     check_refusal,
     numbers_of,
     validate,
 )
 from kk.store import Store
-from kk.types import Fact, FactVersion, HistoryContext, ParsedQuestion, SnapshotRef
+from kk.types import Chunk, Fact, FactVersion, HistoryContext, ParsedQuestion, SnapshotRef
 
 Route = Literal["cache", "fast", "slow", "refusal"]
+
+PROSE_TYPES = frozenset({"text_paragraph", "list_item"})
+CONTEXT_WINDOW = 3  # prose chunks of context on each side of a hit (same page and heading)
+MAX_HISTORY_KEYS = 5  # fact keys whose history goes into a slow-path payload
 
 RATE_ORDER = ("rate", "apy", "apr")  # which attribute a generic "rate" question means
 MAX_SOURCES = 3  # SPEC 4.1
@@ -148,6 +177,34 @@ class _Built:
     history_untrusted: bool
 
 
+@dataclass(frozen=True)
+class _Run:
+    """The inputs every stage after retrieval shares."""
+
+    question: str
+    parsed: ParsedQuestion | None  # ``None`` if parsing raised (SPEC 16: the raw question goes on)
+    ordinal: int
+    snapshots: Sequence[SnapshotRef]
+    ranked: Sequence[RankedChunk]
+    key: str | None
+    allow_slow: bool
+
+
+@dataclass(frozen=True)
+class _Scoring:
+    """What is known about the fast path when a question is escalated or refused."""
+
+    label: str | None = None
+    c: float | None = None
+    caps: tuple[str, ...] = ()
+    candidate: Answer | None = None
+    validated: bool = False
+    bm25: float | None = None
+    cosine: float | None = None
+    raw: float | None = None
+    signals: Signals | None = None
+
+
 def _fact_of(group: CandidateGroup) -> Fact:
     return group.winner.fact if group.winner is not None else group.versions[0].fact
 
@@ -178,15 +235,24 @@ def _has_amount_key(fact: Fact) -> bool:
 class Answerer:
     """Runs the staged answer pipeline against a store."""
 
-    def __init__(  # noqa: PLR0913
+    def __init__(  # noqa: PLR0913, PLR0917
         self,
         store: Store,
         embedder: EmbedderLike,
         config: Config,
         state: IngestState,
         cache: AnswerCache,
+        slow: SlowPath | None = None,
+        rewriter: QueryRewriter | None = None,
+        reranker: Reranker | None = None,
     ) -> None:
         """Keep the collaborators; ``refresh`` builds the entity linker after each ingest."""
+        self.slow = slow
+        self.rewriter = rewriter
+        self.reranker = reranker
+        self._stale_tables: dict[
+            int, tuple[frozenset[str], frozenset[Number], dict[Number, frozenset[str]]]
+        ] = {}
         self.store = store
         self.embedder = embedder
         self.config = config
@@ -197,6 +263,7 @@ class Answerer:
     def refresh(self) -> None:
         """After an ingest: rebuild the entity linker and clear the cache (CACHE-2)."""
         self.cache.clear()
+        self._stale_tables.clear()
         self._linker = build_linker(self.state.labels, self.state.prose_labels)
 
     # --- cache ---------------------------------------------------------------------------------
@@ -247,14 +314,17 @@ class Answerer:
 
     # --- the pipeline --------------------------------------------------------------------------
 
-    def evaluate(self, question: str, as_of: str | None, *, use_cache: bool = True) -> Evaluation:
+    def evaluate(
+        self, question: str, as_of: str | None, *, use_cache: bool = True, allow_slow: bool = True
+    ) -> Evaluation:
         """Run every stage and report the route, answer, confidence and candidate.
 
         ``use_cache=False`` neither reads nor writes the cache (calibration needs the scores of
-        every paraphrase, not the stored answer of the first).
+        every paraphrase, not the stored answer of the first). ``allow_slow=False`` never calls
+        the model: a question that would go there is refused (calibration measures the fast path).
         """
         try:
-            return self._evaluate(question, as_of, use_cache=use_cache)
+            return self._evaluate(question, as_of, use_cache=use_cache, allow_slow=allow_slow)
         except _StageError as err:
             _log.warning("stage failed", extra={"stage": err.stage})
             return self._refuse(question, str(err))
@@ -284,46 +354,71 @@ class Answerer:
             )
         return evaluation.answer
 
-    def _evaluate(  # noqa: PLR0911, PLR0912, PLR0915
-        self, question: str, as_of: str | None, *, use_cache: bool
+    def _evaluate(
+        self, question: str, as_of: str | None, *, use_cache: bool, allow_slow: bool
     ) -> Evaluation:
-        cfg = self.config
         snapshots = self.store.snapshots
         with _guard("as_of"):
             target = target_ordinal(as_of, snapshots)
         if target.ordinal is None:
             return self._refuse(question, f"no snapshot at as_of ({target.reason})")
         ordinal = target.ordinal
-        with _guard("parse"):
-            parsed = parse(question, self._linker, target_ord=ordinal)
-        key = parsed.canonical_key if use_cache else None  # CACHE-1: no key, no cache
+        parsed: ParsedQuestion | None = None
+        try:
+            with _guard("parse"):
+                parsed = parse(question, self._linker, target_ord=ordinal)
+        except _StageError as err:  # a parser bug: log it, and let the slow path read the question
+            _log.warning("stage failed", extra={"stage": err.stage})
+        key = parsed.canonical_key if (parsed is not None and use_cache) else None  # CACHE-1
         cached = self._cache_get(key)
         if cached is not None:
             return Evaluation("cache", cached, "cache hit", None, (), None, True, None)
         if not question.strip() or len(question) > MAX_QUESTION_CHARS:
             return self._refuse(question, "not a member question", caps=("not_covered",))
         with _guard("retrieval"):
-            ranked = retrieve(self.store, self.embedder, question, ordinal, cfg.retrieval)
-        top = ranked[0] if ranked else None
+            ranked = self._retrieve(question, ordinal)
+        run = _Run(question, parsed, ordinal, snapshots, ranked, key, allow_slow)
+        if parsed is None:
+            return self._escalate(run, [], "parse error", _Scoring())
+        try:
+            return self._after_retrieval(run)
+        except (
+            _StageError
+        ) as err:  # SPEC 16: a stage that raises after retrieval goes to the slow path
+            _log.warning("stage failed", extra={"stage": err.stage})
+            return self._escalate(run, [], str(err), _Scoring())
+
+    def _retrieve(self, question: str, ordinal: int) -> list[RankedChunk]:
+        """Hybrid retrieval, tried twice: a store hiccup (IO, a lock) may not repeat."""
+        try:
+            return retrieve(self.store, self.embedder, question, ordinal, self.config.retrieval)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("retrieval failed, retrying", extra={"error": type(exc).__name__})
+            return retrieve(self.store, self.embedder, question, ordinal, self.config.retrieval)
+
+    def _after_retrieval(self, run: _Run) -> Evaluation:  # noqa: PLR0911
+        cfg = self.config
+        question, key = run.question, run.key
+        parsed = run.parsed
+        if parsed is None:  # pragma: no cover - the caller escalates before this point
+            return self._escalate(run, [], "parse error", _Scoring())
+        top = run.ranked[0] if run.ranked else None
         bm25 = (top.bm25 or 0.0) if top is not None else 0.0
         cosine = (top.cosine or 0.0) if top is not None else 0.0
-        groups, pick = self._candidates(parsed, ranked, ordinal, snapshots)
+        groups, pick = self._candidates(parsed, run.ranked, run.ordinal, run.snapshots)
         label = self._label(parsed, groups)
         if not groups:
-            evaluation = self._refuse(
-                question,
-                "no candidate fact",
-                label=label,
-                c=0.0,
-                caps=hard_caps_for_parse(parsed),
-                bm25=bm25,
-                cosine=cosine,
-                raw=0.0,
+            scoring = _Scoring(
+                label, 0.0, hard_caps_for_parse(parsed), None, False, bm25, cosine, 0.0
             )
+            routing = route(0.0, target_ok=True, selection_none_covered=False, cfg=cfg.confidence)
+            if routing.route == "slow":  # a zero floor lets a question with no fact read raw chunks
+                return self._escalate(run, [], "no candidate fact", scoring)
+            evaluation = self._refuse_with(question, "no candidate fact", scoring)
             self._cache_put(key, evaluation.answer)  # deterministic (CACHE-3)
             return evaluation
         with _guard("render"):
-            built = self._build(parsed, pick, ordinal, snapshots, question)
+            built = self._build(parsed, pick, run.ordinal, run.snapshots, question)
         caps = self._caps(parsed, pick, built)
         anchor = pick.primary or groups[0]
         signals = self._signals(top, anchor, pick, groups)
@@ -343,31 +438,18 @@ class Answerer:
             with _guard("validate"):
                 result = validate(built.answer, built.ctx)
             validated, failed = result.ok, result.failed
-
-        def refuse(reason: str) -> Evaluation:
-            return self._refuse(
-                question,
-                reason,
-                label=label,
-                c=c,
-                caps=caps,
-                candidate=candidate,
-                validated=validated,
-                bm25=bm25,
-                cosine=cosine,
-                raw=raw,
-                signals=signals,
-            )
-
+        scoring = _Scoring(label, c, caps, candidate, validated, bm25, cosine, raw, signals)
         if routing.route == "refuse":
-            evaluation = refuse(routing.reason)
+            evaluation = self._refuse_with(question, routing.reason, scoring)
             self._cache_put(key, evaluation.answer)  # CACHE-3: deterministic
             return evaluation
         if routing.route == "slow":
-            return refuse(f"slow path unavailable before Step 10: {routing.reason}")
+            return self._escalate(run, groups, routing.reason, scoring, pick=pick)
         if built is None or built.answer is None or not validated:
             names = ", ".join(failed) if failed else "no answer"
-            return refuse(f"fast answer failed validators ({names}); slow path unavailable")
+            return self._escalate(
+                run, groups, f"fast answer failed validators ({names})", scoring, pick=pick
+            )
         self._cache_put(key, built.answer)
         return Evaluation(
             "fast",
@@ -382,6 +464,291 @@ class Answerer:
             cosine,
             signals,
         )
+
+    # --- the slow path -------------------------------------------------------------------------
+
+    def _refuse_with(self, question: str, reason: str, scoring: _Scoring) -> Evaluation:
+        return self._refuse(
+            question,
+            reason,
+            label=scoring.label,
+            c=scoring.c,
+            caps=scoring.caps,
+            candidate=scoring.candidate,
+            validated=scoring.validated,
+            bm25=scoring.bm25,
+            cosine=scoring.cosine,
+            raw=scoring.raw,
+            signals=scoring.signals,
+        )
+
+    def _escalate(
+        self,
+        run: _Run,
+        groups: Sequence[CandidateGroup],
+        why: str,
+        scoring: _Scoring,
+        *,
+        pick: _Pick | None = None,
+    ) -> Evaluation:
+        """SPEC 12.2 and 16: ask the slow model; any failure is the safe refusal, never cached."""
+        slow = self.slow
+        if not run.allow_slow or slow is None:
+            return self._refuse_with(run.question, f"{why}; slow path unavailable", scoring)
+        if not slow.available:
+            outcome = slow.unavailable()
+            return self._refuse_with(
+                run.question, f"{why}; slow path unavailable: {outcome.reason}", scoring
+            )
+        try:
+            request = self._slow_request(run, groups, pick)
+        except Exception as exc:  # noqa: BLE001 - a payload error is a refusal
+            _log.warning("slow payload failed", extra={"error": type(exc).__name__})
+            return self._refuse_with(
+                run.question, f"{why}; slow path refused: payload {type(exc).__name__}", scoring
+            )
+        outcome = slow.answer(request, run.question)
+        if outcome.answer is None:
+            return self._refuse_with(
+                run.question, f"{why}; slow path refused: {outcome.reason}", scoring
+            )
+        self._cache_put(run.key, outcome.answer)  # a validated answer (CACHE-3)
+        return Evaluation(
+            "slow",
+            outcome.answer,
+            f"{why}; slow path answered",
+            scoring.c,
+            scoring.caps,
+            scoring.candidate,
+            True,
+            scoring.bm25,
+            scoring.raw,
+            scoring.cosine,
+            scoring.signals,
+        )
+
+    @staticmethod
+    def _loser_chunk_ids(groups: Sequence[CandidateGroup]) -> frozenset[str]:
+        """Chunks that carry a value which is not the current one for an in-scope key."""
+        ids: set[str] = set()
+        for group in groups:
+            winner = group.winner
+            if winner is not None and group.resolution.strategy not in STALE_STRATEGIES:
+                continue  # losing on recency alone does not make a value stale
+            for version in group.versions:
+                if winner is None or normalised_value(version) != normalised_value(winner):
+                    ids.add(version.fact.chunk_id)
+        return frozenset(ids)
+
+    def _window(self, chunk: Chunk, ordinal: int, pages: dict[str, list[Chunk]]) -> list[Chunk]:
+        """The chunks around a prose hit: same page, same heading path, up to 3 each side.
+
+        A paragraph or list item is often one line of a card or section (a name, an address, an
+        hours line), meaningless without its neighbours.
+        """
+        page = pages.get(chunk.url)
+        if page is None:
+            page = [
+                c for c in self.store.page_chunks(chunk.url, ordinal) if c.chunk_type in PROSE_TYPES
+            ]
+            pages[chunk.url] = page
+        at = next((i for i, c in enumerate(page) if c.chunk_id == chunk.chunk_id), None)
+        if at is None:
+            return [chunk]
+        low, high = max(0, at - CONTEXT_WINDOW), min(len(page) - 1, at + CONTEXT_WINDOW)
+        start, end = at, at
+        while start > low and page[start - 1].parent_headers == chunk.parent_headers:
+            start -= 1
+        while end < high and page[end + 1].parent_headers == chunk.parent_headers:
+            end += 1
+        return page[start : end + 1]
+
+    def _slow_ranking(self, run: _Run) -> list[RankedChunk]:
+        """What the slow path reads (SRET-1 to SRET-4).
+
+        The question and its rewrites are searched deeply with copies of the same text collapsed,
+        the rankings are fused, and a cheap model puts the passages most likely to answer first.
+        Without a reranker, or when it picks nothing, the fused order stands.
+        """
+        retrieval = self.config.retrieval
+        cfg = retrieval.model_copy(
+            update={"top_k": max(retrieval.slow_top_k, retrieval.rerank_candidates)}
+        )
+        queries = [run.question]
+        if self.rewriter is not None:
+            queries += self.rewriter.rewrite(run.question)
+        rankings: list[list[RankedChunk]] = []
+        for query in queries:
+            try:
+                rankings.append(retrieve_deep(self.store, self.embedder, query, run.ordinal, cfg))
+            except Exception as exc:  # noqa: BLE001 - one failed query must not stop the others
+                _log.warning("slow retrieval failed", extra={"error": type(exc).__name__})
+        if not rankings:
+            return list(run.ranked)
+        by_id = {hit.chunk_id: hit for ranking in rankings for hit in ranking}
+        order = fuse_rankings(
+            [[hit.chunk_id for hit in ranking] for ranking in rankings],
+            rrf_k=retrieval.rrf_k,
+            limit=cfg.top_k,
+        )
+        fused = [by_id[i] for i in order]
+        return self._rerank(run.question, fused, run.ordinal)[: retrieval.slow_top_k]
+
+    def _rerank(self, question: str, fused: list[RankedChunk], ordinal: int) -> list[RankedChunk]:
+        """The reranker's picks first, then the rest in fused order (SRET-3)."""
+        if self.reranker is None:
+            return fused
+        retrieval = self.config.retrieval
+        shown = fused[: retrieval.rerank_candidates]
+        heads = self.store.page_heads(
+            [hit.chunk.url for hit in shown], ordinal, limit=PUBLISHED_HEAD_CHUNKS
+        )
+        snippets = [
+            (n, _snippet(hit.chunk, published_date(heads.get(hit.chunk.url, []))))
+            for n, hit in enumerate(shown, start=1)
+        ]
+        picks = self.reranker.rank(question, snippets, keep=retrieval.rerank_keep)
+        if not picks:
+            return fused
+        first = [shown[n - 1] for n in picks]
+        taken = {hit.chunk_id for hit in first}
+        return first + [hit for hit in fused if hit.chunk_id not in taken]
+
+    def _superseded(
+        self, ranking: Sequence[RankedChunk], run: _Run
+    ) -> tuple[frozenset[str], frozenset[Number], dict[Number, frozenset[str]]]:
+        """Chunks and numbers that hold a value no longer current for the key it belongs to.
+
+        The third item scopes each stale number to the chunks that replaced it (V2).
+
+        The facts of every retrieved chunk (the rows of a retrieved table too) are resolved at
+        the target snapshot, whatever the question names; a chunk whose fact lost to a later
+        effective date or a stronger source is stale (SLOW-2, V2; ``slow.superseded``).
+        """
+        parents = [h.chunk.parent_id or h.chunk.chunk_id for h in ranking]
+        ids = {h.chunk.chunk_id for h in ranking}
+        ids.update(self.store.children_of(list(dict.fromkeys(parents)), run.ordinal))
+        versions = self.store.facts_for_chunks(sorted(ids), run.ordinal)
+        keys = sorted({v.fact.fact_key for v in versions})
+        by_key: dict[str, list[FactVersion]] = {}
+        for version in self.store.facts_by_key(keys, run.ordinal):
+            by_key.setdefault(version.fact.fact_key, []).append(version)
+        chunks, numbers, scopes = superseded_detail(
+            by_key, ordinal=run.ordinal, snapshots=run.snapshots
+        )
+        old_tables, old_numbers, table_scopes = self._stale_table_info(run.ordinal)
+        return chunks | old_tables, numbers | old_numbers, _merge_scopes(scopes, table_scopes)
+
+    def _stale_table_info(
+        self, ordinal: int
+    ) -> tuple[frozenset[str], frozenset[Number], dict[Number, frozenset[str]]]:
+        """Tables replaced by a later generation (``slow.stale_tables``), once per snapshot."""
+        if ordinal not in self._stale_tables:
+            self._stale_tables[ordinal] = stale_tables_detail(self.store.table_chunks(ordinal))
+        return self._stale_tables[ordinal]
+
+    def _parent_chunks(
+        self, run: _Run, ranking: Sequence[RankedChunk], excluded: frozenset[str]
+    ) -> list[ParentChunk]:
+        """What the model reads for each retrieved chunk, best first.
+
+        A table row is replaced by its parent table (header, all rows, footer). A paragraph or
+        list item comes with its neighbours under the same heading, labelled with the heading
+        path. Anything that holds a loser, stale or expired value of an in-scope key is left out,
+        so the model never reads a value that must not be stated (SLOW-2, V2). Each chunk is
+        offered once.
+        """
+        found: dict[str, ParentChunk] = {}
+        emitted: set[str] = set()
+        pages: dict[str, list[Chunk]] = {}
+        for place, hit in enumerate(ranking):
+            score = 1.0 / (place + 1)  # the slow path's own order, reranking included
+            chunk = hit.chunk
+            if chunk.chunk_type in PROSE_TYPES:
+                members = self._window(chunk, run.ordinal, pages)
+                fresh = [c for c in members if c.chunk_id not in emitted]
+                if not fresh or {c.chunk_id for c in members} & excluded:
+                    continue
+                emitted.update(c.chunk_id for c in fresh)
+                found[chunk.chunk_id] = ParentChunk(
+                    chunk.chunk_id,
+                    chunk.url,
+                    chunk.title,
+                    "\n".join(c.text for c in fresh),
+                    score,
+                    chunk.authority_rank,
+                    chunk.parent_headers,
+                    chunk.effective_date,
+                    chunk.expiry_date,
+                    published_date([c.text for c in pages.get(chunk.url, [])]),
+                    tuple(c.chunk_id for c in members),
+                )
+                continue
+            parent_id = chunk.parent_id or chunk.chunk_id
+            if parent_id in found:
+                continue
+            family = {parent_id, chunk.chunk_id, *self.store.children_of([parent_id], run.ordinal)}
+            if family & excluded:
+                continue
+            parent = self.store.get_chunk(parent_id, run.ordinal) or chunk
+            found[parent_id] = ParentChunk(
+                parent_id,
+                parent.url,
+                parent.title,
+                parent.text,
+                score,
+                parent.authority_rank,
+                parent.parent_headers,
+                parent.effective_date,
+                parent.expiry_date,
+                None,
+                tuple(sorted(family)),
+            )
+        return list(found.values())
+
+    def _slow_request(
+        self, run: _Run, groups: Sequence[CandidateGroup], pick: _Pick | None
+    ) -> SlowRequest:
+        """SPEC 13.1: resolved facts, parent chunks, conflict notes, history view, loser numbers."""
+        snapshot = next(s for s in run.snapshots if s.ordinal == run.ordinal)
+        keys = [g.fact_key for g in groups]
+        everything = self.store.facts_by_key(keys, run.ordinal) if keys else []
+        winner_values = [g.winner.fact.value_text for g in groups if g.winner is not None]
+        ranking = self._slow_ranking(run)
+        stale_chunks, stale_numbers, stale_scopes = self._superseded(ranking, run)
+        excluded = self._loser_chunk_ids(groups) | stale_chunks
+        losers = loser_numbers(everything, winner_values) | stale_numbers
+        scopes = _merge_scopes(loser_scopes(groups, everything), stale_scopes)
+        notes = [
+            f"{_fact_of(g).entity_label} {_fact_of(g).attribute}: strategy "
+            f"{g.resolution.strategy}; the value shown is the current one, others are superseded"
+            for g in groups
+            if g.resolution.outcome == "resolved"
+        ]
+        history: list[str] = []
+        if run.parsed is not None and (run.parsed.change_cue or run.parsed.shape == "history"):
+            wanted = set(keys[:MAX_HISTORY_KEYS])
+            history = history_view(
+                [v for v in everything if v.fact.fact_key in wanted], run.snapshots, run.ordinal
+            )
+        primary = pick.primary if pick is not None and pick.primary is not None else None
+        anchor = primary or (groups[0] if groups else None)
+        attribute = _fact_of(anchor).attribute if anchor is not None else "*"
+        tiers = self.config.tier.default_by_attribute
+        inputs = SlowInputs(
+            question=run.question,
+            taken_on=snapshot.taken_on,
+            snapshot_id=snapshot.snapshot_id,
+            groups=groups,
+            chunks=self._parent_chunks(run, ranking, excluded),
+            conflict_notes=notes,
+            history_lines=history,
+            losers=losers,
+            loser_scopes=scopes,
+            default_tier=tiers.get(attribute, tiers.get("*", "entry")),
+            conflict_note=self._conflict_note(anchor) if anchor is not None else None,
+        )
+        return build_request(inputs)
 
     # --- candidates and sibling selection ------------------------------------------------------
 
@@ -706,3 +1073,26 @@ def hard_caps_for_parse(parsed: ParsedQuestion) -> tuple[str, ...]:
     if parsed.change_cue and parsed.shape != "history":
         names.append("change_cue")
     return tuple(names)
+
+
+SNIPPET_CHARS = 220
+PUBLISHED_HEAD_CHUNKS = 6
+
+
+def _snippet(chunk: Chunk, published: str | None = None) -> str:
+    """One line for the reranker: title, publication date, heading path, start of the text."""
+    path = " > ".join(chunk.parent_headers) if chunk.parent_headers else ""
+    text = " ".join(chunk.text.split())[:SNIPPET_CHARS]
+    dated = f"published {published}" if published else ""
+    return " | ".join(part for part in (chunk.title, dated, path, text) if part)
+
+
+def _merge_scopes(
+    *scopes: dict[Number, frozenset[str]],
+) -> dict[Number, frozenset[str]]:
+    """Union of the scopes of every origin of a loser: it is judged against all of them (V2)."""
+    merged: dict[Number, frozenset[str]] = {}
+    for one in scopes:
+        for number, ids in one.items():
+            merged[number] = merged.get(number, frozenset()) | ids
+    return merged

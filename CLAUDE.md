@@ -5,6 +5,10 @@ Read this first in every session. `SPEC.md` says what to build, `DESIGN.md` says
 `IMPLEMENTATION_STEPS.md`; history is in `PROGRESS.md`. One step per session
 (`prompts/implement-step.md`).
 
+**Run instructions.** `submission/NOTES.md` is the authoritative source for how to run the
+submission (keys, no-key behaviour, timing, known limits). `README.md` and this file only point to it;
+keep them short and update `NOTES.md` first.
+
 ## Tech stack
 
 * Python 3.12 for development; the submission stays compatible with 3.10+.
@@ -28,6 +32,7 @@ Read this first in every session. `SPEC.md` says what to build, `DESIGN.md` says
 
 * `make verify`: lint, format check, types, security scan, tests with coverage, package build, eval gate.
 * `make eval`, `make eval-selftest`, `make check-key`, `make export-requirements`.
+* `make package` (hand-in folder and zip, part of `make verify`), `make cleanroom` (fresh venv, no key, no network).
 * The eval gate compares against `tests/eval_baseline.json` (metrics only). Update it only in a step
   that changes accuracy, and only after approval.
 * Eval A: `python harness/run_eval.py --submission submission --eval eval/public_eval.jsonl --out results/<run>`

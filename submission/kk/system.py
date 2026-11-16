@@ -1,8 +1,9 @@
-"""``KnowledgeSystem``: ingest wired end to end and the fast-path ``answer``.
+"""``KnowledgeSystem``: ingest wired end to end, the fast path and the slow path.
 
 Step 7 builds the real index (chunks, table facts, conflicts), Step 8 adds prose facts and
-row-label verification from the extraction model (cached on disk), and Step 9 answers from the
-facts with templates. A question that would need the slow path is refused until Step 10.
+row-label verification from the extraction model (cached on disk), Step 9 answers from the
+facts with templates and Step 10 adds the slow path (a validated model answer, or the safe
+refusal when there is no key or the answer is not accepted).
 """
 
 from __future__ import annotations
@@ -17,10 +18,13 @@ from kk.ingest.extract_cache import ExtractionCache, default_cache_dir
 from kk.ingest.pipeline import IngestState, IngestSummary, ingest_snapshot
 from kk.ingest.prose import ProseExtractor
 from kk.ingest.rowcheck import RowLabelVerifier
-from kk.llm.client import LlmClient, PauseGate, make_client
+from kk.llm.client import LlmClient, PauseGate, StructuredLlmClient, make_client
 from kk.log import get_logger, setup_logging, work_dir_from_env
 from kk.query.answerer import Answerer
 from kk.query.cache import AnswerCache
+from kk.query.rerank import Reranker
+from kk.query.rewrite import QueryRewriter
+from kk.query.slow import SlowPath
 from kk.store import Store
 
 # SPEC 12.3 with no linked entity. Contains no digits, so it can never add a number.
@@ -74,8 +78,16 @@ class KnowledgeSystem:
         )
         self.last_summary: IngestSummary | None = None
         self.answer_cache = AnswerCache(self.config.cache.max_entries)
+        structured = client if isinstance(client, StructuredLlmClient) else None
         self.answerer = Answerer(
-            self.store, self.embedder, self.config, self._state, self.answer_cache
+            self.store,
+            self.embedder,
+            self.config,
+            self._state,
+            self.answer_cache,
+            SlowPath(structured, llm.slow_model, llm.slow_deadline_s, effort=llm.slow_effort),
+            QueryRewriter(client, llm.extract_model) if structured is not None else None,
+            Reranker(client, llm.extract_model) if structured is not None else None,
         )
 
     @property
@@ -107,7 +119,7 @@ class KnowledgeSystem:
             self.answerer.refresh()  # new linker and an empty cache (CACHE-2), even after a failure
 
     def answer(self, question: str, as_of: str | None = None) -> Answer:
-        """The fast-path answer, or the safe refusal (SPEC 12.3). Never raises (IF-3)."""
+        """The fast, cached or slow answer, or the safe refusal (SPEC 12.3). Never raises (IF-3)."""
         try:
             return self.answerer.answer(question, as_of)
         except Exception:  # noqa: BLE001 - the harness must always get an Answer

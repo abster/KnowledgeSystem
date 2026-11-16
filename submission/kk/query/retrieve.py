@@ -92,6 +92,15 @@ def fuse(
     ]
 
 
+def fuse_rankings(rankings: Sequence[Sequence[str]], *, rrf_k: int, limit: int) -> list[str]:
+    """Reciprocal-rank fusion of several ranked id lists; ties go to the lower id."""
+    scores: dict[str, float] = defaultdict(float)
+    for ranking in rankings:
+        for rank, item in enumerate(ranking, start=1):
+            scores[item] += 1.0 / (rrf_k + rank)
+    return sorted(scores, key=lambda i: (-scores[i], i))[:limit]
+
+
 def retrieve(
     store: Store, embedder: EmbedderLike, question: str, target_ord: int, cfg: Retrieval
 ) -> list[RankedChunk]:
@@ -168,3 +177,44 @@ def candidate_facts(  # noqa: PLR0913
         group_versions = tuple(v for v in everything if v.visible_at(target_ord))
         groups.append(CandidateGroup(fact_key, group_versions, resolution, score, q, e, rrf))
     return sorted(groups, key=lambda g: (-g.score, -g.rrf, g.fact_key))
+
+
+def _text_key(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
+def dedupe_hits(hits: Sequence[StoredHit], limit: int) -> list[StoredHit]:
+    """Keep the best-ranked hit of each distinct text, at most ``limit`` (SRET-4).
+
+    Boilerplate such as a closing paragraph repeated on hundreds of pages would otherwise fill
+    the ranking and push the one page that answers the question out of reach. Empty text is
+    never treated as a copy of anything.
+    """
+    seen: set[str] = set()
+    kept: list[StoredHit] = []
+    for hit in hits:
+        key = _text_key(hit.chunk.text)
+        if key:
+            if key in seen:
+                continue
+            seen.add(key)
+        kept.append(hit)
+        if len(kept) == limit:
+            break
+    return kept
+
+
+def retrieve_deep(
+    store: Store, embedder: EmbedderLike, question: str, target_ord: int, cfg: Retrieval
+) -> list[RankedChunk]:
+    """The slow path's search (SRET-4).
+
+    Reads ``slow_pool_k`` rows from each index, collapses copies of the same text, keeps
+    ``per_index_k`` of each and fuses.
+    """
+    text = clean_text(question)
+    vector_hits = store.search_vector(embedder.embed_query(text), target_ord, cfg.slow_pool_k)
+    text_hits = store.search_text(text, target_ord, cfg.slow_pool_k)
+    return fuse(
+        dedupe_hits(vector_hits, cfg.per_index_k), dedupe_hits(text_hits, cfg.per_index_k), cfg
+    )

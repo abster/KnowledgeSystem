@@ -129,3 +129,18 @@ def test_one_oversized_text_is_still_embedded_alone() -> None:
     recorder = _Recording()
     embed_in_batches(recorder, ["z" * 500], max_batch_chars=100)
     assert [len(b) for b in recorder.batches] == [1]
+
+
+def test_link_targets_are_not_embedded() -> None:  # decision 37: they help answers, not matching
+    from kk.ingest.embed import embed_in_batches, strip_link_targets  # noqa: PLC0415
+    from tests.fixtures.embedder import FakeEmbedder  # noqa: PLC0415
+
+    text = (
+        "Open a savings account (https://join.example.test/p?x=1)"
+        " or see rates (/personal/rates) (APY)"
+    )
+    assert strip_link_targets(text) == "Open a savings account or see rates (APY)"
+    assert strip_link_targets("No links here (APY)") == "No links here (APY)"
+    embedder = FakeEmbedder()
+    embed_in_batches(embedder, [text], max_batch_chars=8000)
+    assert embedder.document_texts == ["Open a savings account or see rates (APY)"]

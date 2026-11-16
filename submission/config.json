@@ -18,7 +18,7 @@
     },
     "cache": {"set_by": "SPEC 3 initial value", "dataset": "none"}
   },
-  "retrieval": {"top_k": 20, "per_index_k": 40, "rrf_k": 60},
+  "retrieval": {"top_k": 20, "per_index_k": 40, "rrf_k": 60, "slow_top_k": 60, "slow_per_index_k": 120, "slow_pool_k": 1500, "rerank_candidates": 150, "rerank_keep": 30},
   "confidence": {
     "weights": {"similarity": 0.30, "margin": 0.20, "qualifier": 0.30, "entity": 0.20},
     "tau_floor": 0.0,
@@ -31,6 +31,7 @@
     "slow_model": "claude-sonnet-5-5",
     "extract_model": "claude-haiku-5-5",
     "slow_deadline_s": 15,
+    "slow_effort": "medium",
     "extract_concurrency": 8
   },
   "flags": {"polish": false, "llm_crosscheck": false, "ingest_llm_verify": true},

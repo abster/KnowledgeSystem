@@ -311,3 +311,33 @@ def test_empty_store_answers_every_query_with_nothing(store: Store, embedder: Fa
     assert store.facts_by_key(["nope"]) == []
     assert store.visible_fact_versions(1) == []
     assert store.conflict_records() == []
+
+
+def test_page_chunks_lists_one_pages_chunks_in_position_order(
+    store: Store, embedder: FakeEmbedder
+) -> None:
+    other = _chunk("Elsewhere", kind="text_paragraph", url="https://example.test/other")
+    chunks = [
+        replace(_chunk(text, kind="text_paragraph"), position=pos)
+        for pos, text in ((5, "third"), (1, "first"), (3, "second"))
+    ]
+    store.add_snapshot(_ref(1, "2026-05-12"), [*chunks, other], [], embedder)
+    assert [c.text for c in store.page_chunks(URL, 1)] == ["first", "second", "third"]
+    assert store.page_chunks(URL, 2) == []  # not visible at a later ordinal it was not seen in
+    assert store.page_chunks("https://example.test/missing", 1) == []
+
+
+def test_page_heads_lists_the_first_chunks_of_each_page(
+    store: Store, embedder: FakeEmbedder
+) -> None:
+    other_url = "https://example.test/other"
+    chunks = [
+        replace(_chunk(f"a{pos}", kind="text_paragraph"), position=pos) for pos in range(8)
+    ] + [replace(_chunk("b0", kind="text_paragraph", url=other_url), position=0)]
+    store.add_snapshot(_ref(1, "2026-05-12"), chunks, [], embedder)
+    heads = store.page_heads([URL, other_url, "https://example.test/missing"], 1, limit=3)
+    assert heads[URL] == ["a0", "a1", "a2"]
+    assert heads[other_url] == ["b0"]
+    assert "https://example.test/missing" not in heads
+    assert store.page_heads([], 1, limit=3) == {}
+    assert store.page_heads([URL], 2, limit=3) == {}

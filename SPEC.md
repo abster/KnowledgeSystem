@@ -85,6 +85,11 @@ All numbers that this spec calls "initial" live in `submission/config.json`, are
 | `retrieval.top_k` | Chunks returned after fusion | 20 |
 | `retrieval.per_index_k` | Candidates taken from each of the vector and keyword searches | 40 |
 | `retrieval.rrf_k` | Reciprocal-rank-fusion constant | 60 |
+| `retrieval.slow_top_k` | Chunks the slow path reads after fusing the question and its rewrites (decision 36) | 60 |
+| `retrieval.slow_per_index_k` | Candidates kept from each search for the slow path, after copies of the same text are collapsed | 120 |
+| `retrieval.slow_pool_k` | Rows read from each search before copies are collapsed (SRET-4) | 1500 |
+| `retrieval.rerank_candidates` | Fused candidates shown to the reranker (SRET-6) | 150 |
+| `retrieval.rerank_keep` | Candidates the reranker may pick | 30 |
 | `confidence.weights` | similarity, margin, qualifier, entity | 0.30, 0.20, 0.30, 0.20 |
 | `confidence.tau_floor` | Relevance floor | 0.30 |
 | `confidence.tau_accept` | Fast-path acceptance | 0.80 |
@@ -94,6 +99,7 @@ All numbers that this spec calls "initial" live in `submission/config.json`, are
 | `llm.slow_model` | Slow-path model | `claude-sonnet-5-5` |
 | `llm.extract_model` | Ingest extraction model | `claude-haiku-5-5` |
 | `llm.slow_deadline_s` | Total time allowed for one slow-path answer | 15 |
+| `llm.slow_effort` | Reasoning depth of the slow call (`low`, `medium`, `high`; decision 38) | medium |
 | `llm.extract_concurrency` | Parallel extraction calls at ingest | 8 |
 | `flags.polish` | Light-model polish of template text | false |
 | `flags.llm_crosscheck` | Query-time LLM cross-check of the question parse | false |
@@ -194,7 +200,7 @@ Rebuilt in full at the end of each `ingest`. Fields: `conflict_id`, `topic`, `fa
 ### 6.2 Markdown parsing
 
 * **ING-4** A page's markdown is parsed into ordered blocks: heading (level, text), paragraph, list (items), table (header row, alignment row, data rows), code block, thematic break. Parsing uses `markdown-it-py` with the GFM table extension.
-* **ING-5** Raw HTML tags and image links are removed from text but their alt text is kept. Footnote markers in table headers are not removed here (section 6.7.2 does it).
+* **ING-5** Raw HTML tags and image links are removed from text but their alt text is kept. A link in a paragraph or list item keeps its target after its text, as `text (target)`, unless the target repeats the text or is only a fragment (decision 37); headings and table cells keep the text only. Footnote markers in table headers are not removed here (section 6.7.2 does it).
 * **ING-6** A page that fails to parse, is empty, or exceeds 5 MB is skipped and counted.
 
 ### 6.3 Chunking
@@ -638,11 +644,20 @@ The fast path cites the chunk (and its page) of the winning fact. The slow path 
 
 ### 13.1 Inputs
 
-The slow path receives: the question (original text); the target snapshot date; the resolved facts for the candidate fact keys (value, qualifiers, effective and expiry dates, authority, snapshot id); the matched parent chunks (tables with header and footer notes), capped at 12000 characters in total, ordered by candidate score; conflict notes for in-scope keys; for change-cue questions that do not take the fast history template, the fact-history view (13.3); and, for tier-ambiguous questions, all sibling facts (13.4).
+The slow path receives: the question (original text); the target snapshot date; the resolved facts for the candidate fact keys (value, qualifiers, effective and expiry dates, authority, snapshot id); the matched parent chunks (a table row is replaced by its parent table with header and footer notes; a paragraph or list item comes with up to three neighbouring chunks on each side under the same heading, labelled with its heading path, decision 35), capped at 12000 characters in total, ordered by candidate score, taken from the deeper search of 13.5; conflict notes for in-scope keys; for change-cue questions that do not take the fast history template, the fact-history view (13.3); and, for tier-ambiguous questions, all sibling facts (13.4).
+
+### 13.5 Retrieval for the slow path
+
+* **SRET-1** The slow path searches the question and up to three alternative queries from one short call to `llm.extract_model` (no key, a timeout of 4 s or any error gives no alternatives), each with `retrieval.slow_top_k` and `retrieval.slow_per_index_k`, and fuses the rankings by reciprocal rank (decision 36). The fast path never makes this call.
+* **SRET-2** A retrieved chunk is left out of the payload, and its numbers become known losers (V2), when it is superseded: its fact lost its key on effective date or on source authority (losing on snapshot recency alone does not count), or it is a table whose later generation exists, meaning another table with the same section heading and columns, at least three shared row labels with at least 70% overlap, and a later effective date (decision 39).
+* **SRET-3** Several differing statements for one non-numeric key are not a conflict (decision 27): they are listed side by side with their pages. Only an unresolved numeric conflict blocks its values.
+* **SRET-4** Each search reads `retrieval.slow_pool_k` rows and keeps the best-ranked row of each distinct text (compared without case or spacing differences) before the first `retrieval.slow_per_index_k` are fused. A closing paragraph repeated on hundreds of pages otherwise fills the ranking and hides the one page that answers (decision 40).
+* **SRET-5** A news or blog page is labelled `published <date>` when one of its first six chunks is short (200 characters or fewer) and ends with a date written as `June 20, 2025`. The date is a label only: it is never an `effective_date`, never enters fact resolution, and is not stored. The prompt tells the model to use the value on the page with the newest publication date when pages disagree (decision 41).
+* **SRET-6** After fusion, one call to `llm.extract_model` (6 s timeout, no key or any error means no reranking) receives the question and a one-line snippet of each of the first `retrieval.rerank_candidates` fused chunks (page title, publication date, heading path, start of the text) and returns the numbers of up to `retrieval.rerank_keep` chunks most likely to answer. Those chunks come first in the payload; the rest keep their fused order. The order given to the model is the order the payload is built in (decision 42).
 
 ### 13.2 Call and output
 
-* **SLOW-1** One call to `llm.slow_model` with structured output matching (no sampling parameters, decision 26): `answerable` (bool), `answer` (string), `evidence_ids` (list of chunk or fact ids), `loser_values_mentioned` (list of strings, must be empty).
+* **SLOW-1** One call to `llm.slow_model` with structured output matching (no sampling parameters, decision 26): `answerable` (bool), `answer` (string), `evidence_ids` (list of chunk or fact ids), `loser_values_mentioned` (list of strings, must be empty), and `reason` (optional string: one sentence on what is missing when `answerable` is false; logged, never shown, decision 38).
 * **SLOW-2** The system prompt instructs: answer only from the supplied evidence; never use a value marked stale, expired or superseded; state the assumed tier when the question omits it; say `answerable=false` when the evidence does not contain the answer.
 * **SLOW-3** The answer is accepted only if `answerable` is true, every `evidence_id` was supplied, the validators pass, and the response parsed against the schema.
 * **SLOW-4** Total time for one slow-path answer is bounded by `llm.slow_deadline_s`. One retry is allowed only for rate-limit or server errors and only if more than half the deadline remains. After the deadline the result is the safe refusal.
@@ -673,8 +688,8 @@ Run on every answer from both paths, in this order. A failure on the fast path e
 
 | ID | Check | Rule |
 |---|---|---|
-| V1 | Number grounding | Extract numbers from `text` using the scorer's own number extraction (value and unit). Every number MUST be in the allowed set: the winning fact value(s); qualifier numbers on the winning keys (tier amounts, terms, model years); numbers in the question; the numbers in the dates a template prints (ISO date parts of the snapshot or fact date); for `history` answers, every segment value of the key |
-| V2 | Stale and loser | If `text` contains a number that is a known loser or expired value for an in-scope key and is not a winner for any in-scope key, reject. Known losers come from the conflicts table, earlier snapshots and expired chunks |
+| V1 | Number grounding | Extract numbers from `text` using the scorer's own number extraction (value and unit). Every number MUST be in the allowed set: the winning fact value(s); qualifier numbers on the winning keys (tier amounts, terms, model years); numbers in the question; the numbers in the dates a template prints (ISO date parts of the snapshot or fact date); for `history` answers, every segment value of the key; for the slow path also the numbers in the cited facts' own row, dates and qualifiers, and the numbers in the cited page text (beside tier siblings only dollar amounts and plain numbers, never a percentage: a rate must come from a resolved sibling fact, TIER-5) |
+| V2 | Stale and loser | If `text` contains a number that is a known loser or expired value for an in-scope key and is not a winner for any in-scope key, reject. Known losers come from the conflicts table, earlier snapshots and expired chunks. On the slow path each loser carries a scope, the chunks that hold the value that replaced it (decision 43): a loser is excused only when the answer cites none of those chunks and cited evidence from elsewhere prints the number; a loser without a scope, or that no cited evidence prints, is rejected as before |
 | V3 | Refusal shape | A refusal has `confident=False`, no digit that is not in the question, and no sources |
 | V4 | Citation | Every cited URL belongs to the winning evidence (fast path) or to retrieved evidence (slow path) |
 | V5 | Quote verbatim (prose facts) | A quoted sentence appears verbatim in the source chunk |
@@ -697,8 +712,9 @@ Stated limit: V2 can only catch stale values that became facts; V1 is the main s
 |---|---|
 | Invalid `as_of` | Safe refusal |
 | No snapshot at `as_of` | Safe refusal |
-| Parse raises | Slow path (with the raw question) |
-| Retrieval or store raises | Slow path; if that also fails, safe refusal |
+| Parse raises | Slow path (with the raw question); logged as a bug |
+| Retrieval or store raises | Retried once; if it still fails, safe refusal (the slow path would have no evidence) |
+| A stage after retrieval raises | Slow path |
 | Fast answer fails a validator | Slow path |
 | Slow path: no key, timeout, rate limit, malformed output, validator failure | Safe refusal |
 | `c < tau_floor` | Safe refusal, no model call |
@@ -751,6 +767,24 @@ Line coverage of at least 90% on the extraction, normaliser, resolution and `as_
 ### 19.4 Docker
 
 `docker compose` provides `verify` (runs `make verify`) and `eval` (runs the public eval). There is no database service; the submission itself needs no Docker.
+
+### 19.5 Held-out question set (`tools/heldout.py`)
+
+This is the set behind AC-14 for the slow path. It is a developer tool, not part of the submission, and its questions and answers are local files under `results/heldout/` (git-ignored, because they contain site text).
+
+* **Generation** (`make heldout-generate`, needs a key). It samples paragraphs and list items from the latest snapshot, half of each where possible, and has the extraction model write one member-style question per passage plus 1 to 3 key phrases. A phrase is kept only if it occurs verbatim in the passage, so the gold comes from the page and not from the system's own extraction. Questions are never written from the public questions.
+* **Split.** Each item belongs to a part by a stable hash of its group (`HELD_SHARE` 0.5): `dev` is the half the owner may read and tune against, `held` is the half that is never used to tune anything. Both are reported. Reading failures from `held` weakens it, so any change motivated by it is noted in the step report.
+* **Run** (`make heldout PART=dev|held|all`). The whole system answers each question with the answer cache off, and the tool prints strict and close accuracy, accuracy by passage kind and the reasons for refusals.
+* **Scope.** Every item is answerable from one passage of the latest snapshot. The set has no negative, paraphrased, adversarial, as-of or conflict items, so it measures prose coverage on the slow path and does not replace the public eval.
+
+**Scoring criteria.** The slow path is a model, so the same correct answer can use different words. No string rule is exact, so two rules are reported and the truth lies between them.
+
+| Score | Rule | Reading |
+|---|---|---|
+| Strict (lower bound) | The scorer's own value-aware match (`harness/scoring.py`): every key phrase appears in the answer, numbers by value and unit, text as a normalised substring. A refusal is wrong. | Never credits a wrong answer by this rule, but counts a correct paraphrase as wrong ("8 steps" for "eight steps"). |
+| Close (upper bound) | The strict rule, or for each phrase: every number in it appears in the answer, number words equal digits, case and punctuation are ignored, and at least 80% of its content words appear (matched on their first five letters). A refusal is wrong. | Credits correct paraphrases, but can credit an answer that has the right words and states the wrong thing. |
+
+Both figures are reported next to the public accuracy. AC-14 is judged on the gap to the close score and the strict score is the floor beside it. The set was not graded by hand or by a model, so the true accuracy is not measured, only bracketed. The close score is the owner's choice for the headline figure.
 
 ## 20. Acceptance criteria
 
@@ -811,6 +845,14 @@ These were chosen while writing the spec because `DESIGN.md` did not settle them
 32. **Conflict note wording.** `strategy=<name>: <winner> used; <loser values> superseded`, built from the winning group at the target ordinal (CA-1); only a resolved conflict gets one.
 33. **A generic "rate" question.** The attributes `rate`, `apy` and `apr` are tried in that order; the qualifier match counts only an exact attribute, so "rate" answered by an APY alone scores low and goes to the slow path (observed on deposit rows, kept: precision first).
 
+34. **Retrieval retry.** A failed search is repeated once (a store hiccup may not repeat); a second failure is the safe refusal. A parse failure still reaches the slow path with the raw question (SPEC 16). Parsing never raised on 1,360 real and generated questions plus 24,000 random and mutated strings (Step 10).
+35. **Page context for prose hits.** SPEC 6.3 returned a paragraph as is; in the data most prose chunks are one line of a card or section ("Lobby ...", an address), meaningless alone. The slow path adds up to three neighbours each side under the same heading, with the heading path (the owner approved this in Step 10).
+36. **Deeper retrieval and query rewriting for the slow path.** Public recall at 20, 40 and 60 chunks was 0.79, 0.82 and 0.85; the vocabulary gap ("mortgage" against "Home Loans") left the table at rank 158. The slow path reads 60 chunks and adds up to three rewritten queries (the owner approved this in Step 10).
+37. **Link targets are kept in prose.** Questions such as "where do I ..." need the address of the link; the parser dropped it. Chunk text changes for every paragraph or list item with a link, so those chunks were embedded and extracted again once (5,461 extraction calls, about $0.80).
+38. **Slow-call settings.** `llm.slow_effort` (medium) bounds the model's reasoning time inside the 15 s deadline; the optional `reason` field records why the model declined, for diagnosis. The prompt states that an effective date earlier than the snapshot date does not make a value stale, and allows an answer scoped to one branch, product or program when the question is general. Chunk labels carry the effective and expiry dates, the prompt prefers the latest effective date and forbids mentioning older values unless the question asks how something changed, and embeddings ignore link targets (decision 37).
+
+39. **Stale means replaced.** The first version of SRET-2 treated every non-winning value as stale and removed a chunk that carried the answer (two unrelated articles sharing a key, resolved by snapshot recency only). Staleness now needs evidence of replacement. Rate tables that give no facts are compared as generations of one table (decision above); on the real snapshots this finds exactly one stale table of 216.
+
 ## 22. Deferred to the implementation plan
 
 * Exact `bge-small-en-v1.5` weight packaging and size (Step 7: fastembed's quantised ONNX build, about 64 MB, fetched once with `make fetch-model` into `submission/models/`).
@@ -820,3 +862,9 @@ These were chosen while writing the spec because `DESIGN.md` did not settle them
 * The final initial values for confidence weights, `tau_floor`, `tau_accept`, produced by calibration.
 * Whether the query-time LLM cross-check (`flags.llm_crosscheck`) is switched on, decided by held-out precision (AC-9).
 * The task breakdown, order of work and milestones.
+40. **Collapse copies, then search deeper.** In the public set the page that states who may join ranked about 975th by BM25 because the words "become" and "member" occur in a closing paragraph copied onto hundreds of pages. Collapsing identical text before cutting each ranking removes that crowding without changing the fast path (the owner approved this in Step 10).
+41. **Publication date as a label.** Branch counts and similar figures are repeated in press-release boilerplate that changes over time (24, then 23, then 22 branches). No table carries an effective date for them, so the model could not tell which was newest. The byline date of the page is shown as `published`; extending `effective_date` itself would have changed fact resolution for every news fact, so it was not done (the owner approved the label in Step 10).
+42. **Rerank by a cheap model.** In four trials the page that states the join rules sat at positions 51 to 81 of the fused list and moved to position 1 after reranking. The reranker is optional (same fail-safe as query rewriting) and costs one short Haiku call. A bug found while measuring it: the payload builder sorted by the original fusion score and so discarded the reranked order; it now uses the slow path's own order.
+43. **V2 is scoped to the key a loser belongs to.** A stale table's numbers were losers for every answer in the snapshot, so a correct checking-rate answer was refused because `0.00%` also appeared in an older table of another product (the one public refusal that V2 caused). Each loser now carries the chunks of the value that replaced it. The check fails closed: no scope, an empty scope, citing any chunk in the scope, or a number that no cited evidence prints all still reject. A bare small integer shortcut was considered and dropped: it would not have fixed this case and it weakens the guard for counts.
+44. **Scoped answers instead of refusals, and printable label dates.** When the evidence answers only for particular branches, products or programs (hours listed branch by branch), the model gives what it states, names each scope and says it can vary, instead of refusing. The dates shown in a chunk label (effective, expires, published) are part of what the model read, so a cited chunk's label dates may be printed (V1); before, an answer that said "listed April 2024" failed V1.
+45. **List numbering is not a number; spelled-out numbers ground digits.** V1 and V2 skip list markers (`(1)`, a line that starts `3.` or `4)`, and `1)` after a colon or sentence end), which are not values and had refused correct step lists (and collided with a stale `4` in V2). In the slow path, a number word in the cited evidence ("eight") grounds the same digit in the answer ("8"); the reverse is not applied, so a word such as "one" in an answer never needs grounding. A figure the evidence does not print, such as a computed "8 years", is still refused. See 19.5 for the held-out scoring bounds.

@@ -12,6 +12,7 @@ from scoring import _numbers  # the harness: dev-only equivalence check
 from contract import Answer, Source
 from kk.query.render import safe_refusal
 from kk.query.validators import (
+    CitedEvidence,
     ValidationContext,
     amount_numbers,
     check_citations,
@@ -21,6 +22,7 @@ from kk.query.validators import (
     check_stale,
     extract_numbers,
     numbers_of,
+    spelled_numbers,
     validate,
 )
 
@@ -248,3 +250,102 @@ def test_validate_a_refusal_is_checked_by_v3_only() -> None:
     assert validate(bad, ctx).failed == ("V3",)
     confident = Answer(text="Sure.", sources=[], confident=True)
     assert validate(confident, ctx).failed == ("V3",)
+
+
+# --- V2 scoped to the key a loser belongs to ---------------------------------------------------
+
+OLD = ("%", 0.0)
+SCOPE = frozenset({"table-new"})
+
+
+def _cited(ids: set[str], text: str) -> CitedEvidence:
+    return CitedEvidence(frozenset(ids), numbers_of([text]))
+
+
+def test_a_loser_that_only_unrelated_cited_evidence_holds_is_not_a_violation() -> None:
+    cited = [_cited({"checking"}, "Free Checking | 0.00% | 0.00%")]
+    assert check_stale(
+        "Free Checking pays 0.00%.", frozenset({OLD}), frozenset(), {OLD: SCOPE}, cited
+    )
+
+
+def test_a_loser_is_a_violation_when_the_answer_cites_the_evidence_that_replaced_it() -> None:
+    cited = [_cited({"table-new"}, "Savings | 0.10%"), _cited({"checking"}, "Checking | 0.00%")]
+    assert not check_stale(
+        "Savings pays 0.00%.", frozenset({OLD}), frozenset(), {OLD: SCOPE}, cited
+    )
+
+
+def test_a_loser_with_an_unknown_or_empty_scope_stays_strict() -> None:
+    cited = [_cited({"checking"}, "Checking | 0.00%")]
+    losers = frozenset({OLD})
+    assert not check_stale("It pays 0.00%.", losers, frozenset(), {}, cited)
+    assert not check_stale("It pays 0.00%.", losers, frozenset(), {OLD: frozenset()}, cited)
+    assert not check_stale("It pays 0.00%.", losers, frozenset(), None, cited)
+
+
+def test_a_loser_that_no_cited_evidence_holds_is_a_violation() -> None:
+    cited = [_cited({"checking"}, "Checking | 0.25%")]
+    assert not check_stale("It pays 0.00%.", frozenset({OLD}), frozenset(), {OLD: SCOPE}, cited)
+
+
+def test_a_bare_loser_matches_cited_evidence_by_value() -> None:
+    old = ("", 36.0)
+    cited = [_cited({"loans"}, "Term | 36 months")]
+    assert check_stale("A 36 month term.", frozenset({old}), frozenset(), {old: SCOPE}, cited)
+
+
+def test_validate_uses_the_scopes_and_the_cited_evidence_of_the_context() -> None:
+    answer = Answer(text="Free Checking pays 0.00%.", sources=[], confident=True)
+    base = ValidationContext(
+        question="q",
+        allowed=numbers_of(["0.00%"]),
+        losers=frozenset({OLD}),
+        loser_scopes={OLD: SCOPE},
+        cited=(_cited({"checking"}, "Checking | 0.00%"),),
+    )
+    assert "V2" not in validate(answer, base).failed
+    strict = ValidationContext(
+        question="q", allowed=base.allowed, losers=base.losers, cited=base.cited
+    )
+    assert "V2" in validate(answer, strict).failed
+
+
+def test_list_markers_are_not_numbers_to_ground() -> None:
+    allowed = numbers_of(["ABA routing number"])
+    text = "(1) Beneficiary: name. (2) Bank: ABA number.\n3. The amount.\n4) Done."
+    assert check_grounding(text, allowed)
+
+
+def test_a_number_beside_a_marker_still_needs_grounding() -> None:
+    assert not check_grounding("(1) The fee is $25.", numbers_of(["ABA"]))
+    assert not check_grounding("Call 800 for step (2) now.", numbers_of(["ABA"]))
+
+
+def test_spelled_numbers_read_as_numbers() -> None:
+    assert ("", 8.0) in spelled_numbers(["it takes eight years", "Twenty students"])
+    assert ("", 20.0) in spelled_numbers(["Twenty students"])
+    assert spelled_numbers(["no numbers here, only someone"]) == frozenset()
+
+
+def test_spelled_numbers_ground_the_digit_form() -> None:
+    allowed = spelled_numbers(["break even in eight years"])
+    assert check_grounding("It takes 8 years to break even.", allowed)
+    assert not check_grounding("It takes 9 years to break even.", allowed)
+
+
+def test_inline_list_numbering_after_a_colon_or_sentence_is_not_a_number() -> None:
+    allowed = numbers_of(["https"])
+    text = "Check these: 1) Look for https. 2) Search the name. 3) Read reviews."
+    assert check_grounding(text, allowed)
+
+
+def test_a_number_in_parentheses_inside_a_sentence_is_still_a_number() -> None:
+    assert not check_grounding("Members (ages 18 to 24) qualify.", numbers_of(["https"]))
+    assert not check_grounding("The fee (about 4) applies.", numbers_of(["https"]))
+
+
+def test_list_numbering_does_not_collide_with_a_stale_number() -> None:
+    losers = frozenset({("", 4.0)})
+    assert check_stale("Options: 1) Stay. 2) Move. 3) Roll over. 4) Cash out.", losers, frozenset())
+    assert not check_stale("The term is 4 years.", losers, frozenset())

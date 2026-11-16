@@ -439,7 +439,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     facts = _resolved_table_facts(ks, args.max_facts)
     questions = [*public_questions(args.eval), *generate_questions(facts)]
     print(f"scoring {len(questions)} questions", file=sys.stderr)  # noqa: T201
-    evaluations = [ks.answerer.evaluate(q.text, q.as_of, use_cache=False) for q in questions]
+    evaluations = [
+        ks.answerer.evaluate(q.text, q.as_of, use_cache=False, allow_slow=False) for q in questions
+    ]
     items, bound = _score_all(questions, evaluations, ks.config)
 
     train, _ = split_items(items)
