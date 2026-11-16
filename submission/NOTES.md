@@ -30,10 +30,20 @@ repository, not in this folder).
 
 ## How to run
 
-1. `pip install -r requirements.txt` (Python 3.10 or newer). Nothing else is needed: the
+Run everything from the top folder of the kit (the one that contains `harness/`, `eval/` and this
+folder). In these commands this folder is called `submission`; use its real name if you renamed it.
+
+1. Install the packages (Python 3.10 or newer). From the kit's top folder:
+   `pip install -r submission/requirements.txt`
+   (from inside this folder it is `pip install -r requirements.txt`). Nothing else is needed: the
    embedding weights are in `models/` and the extraction cache is in `cache/extraction/`.
-2. Score it with the harness from the kit:
-   `python harness/run_eval.py --submission <this folder> --eval eval/public_eval.jsonl --out results/run`
+2. Score it with the harness from the kit's top folder:
+   `python harness/run_eval.py --submission submission --eval eval/public_eval.jsonl --out results/run`
+   The harness prints one line per snapshot while it ingests, then nothing while it answers the
+   questions, and the score at the end. With the key set, expect roughly 5 to 10 minutes in total
+   (see Timing). A quiet terminal after the last `ingest` line is normal. Keep the machine awake
+   (on macOS, prefix the command with `caffeinate -i`): a sleeping laptop inflates the measured
+   latency.
 3. Working files (the LanceDB directory, logs) go under `KK_WORK_DIR`; the default is a fresh
    temporary directory per `build()`, removed when the system is closed (`close()`), dropped or the
    process ends. A folder you set is never removed. Snapshot folders are never written to.
