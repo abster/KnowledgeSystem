@@ -35,7 +35,8 @@ repository, not in this folder).
 2. Score it with the harness from the kit:
    `python harness/run_eval.py --submission <this folder> --eval eval/public_eval.jsonl --out results/run`
 3. Working files (the LanceDB directory, logs) go under `KK_WORK_DIR`; the default is a fresh
-   temporary directory per `build()`. Snapshot folders are never written to.
+   temporary directory per `build()`, removed when the system is closed (`close()`), dropped or the
+   process ends. A folder you set is never removed. Snapshot folders are never written to.
 4. Environment overrides: `KK_WORK_DIR`, `KK_ENV_FILE` (path of the `.env` file),
    `KK_EXTRACT_CACHE_DIR`.
 

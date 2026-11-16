@@ -9,6 +9,10 @@ refusal when there is no key or the answer is not accepted).
 from __future__ import annotations
 
 import contextlib
+import os
+import shutil
+import weakref
+from pathlib import Path
 
 from contract import Answer, Conflict, Snapshot
 from kk.config import Config, load_config
@@ -31,6 +35,10 @@ from kk.store import Store
 REFUSAL_TEXT = "I couldn't find that information on Dupaco's website. Please contact Dupaco."
 
 
+def _remove_folder(path: Path) -> None:
+    shutil.rmtree(path, ignore_errors=True)
+
+
 class KnowledgeSystem:
     """Ingests snapshots into LanceDB and answers from the stored facts."""
 
@@ -46,7 +54,13 @@ class KnowledgeSystem:
         API key exists. Without one, ingest still uses cached extraction results (PRO-7).
         """
         self.config = config or load_config()
+        owns_work_dir = not os.environ.get("KK_WORK_DIR")
         self.work_dir = work_dir_from_env()
+        # A temporary folder made here goes when the system is closed, dropped or the process
+        # ends; a folder named by KK_WORK_DIR belongs to the caller and is never removed.
+        self._cleanup = (
+            weakref.finalize(self, _remove_folder, self.work_dir) if owns_work_dir else None
+        )
         setup_logging(self.work_dir)
         self._log = get_logger("system")
         self.embedder: EmbedderLike = embedder if embedder is not None else load_embedder()
@@ -99,6 +113,15 @@ class KnowledgeSystem:
     def prose_labels(self) -> frozenset[str]:
         """Entity ids named by prose facts (for entity linking in Step 9)."""
         return frozenset(self._state.prose_labels)
+
+    def close(self) -> None:
+        """Remove the temporary work folder this system made. Safe to call more than once.
+
+        A folder given by ``KK_WORK_DIR`` is left alone. Dropping the system or ending the
+        process does the same, so callers that never call this leave nothing behind.
+        """
+        if self._cleanup is not None:
+            self._cleanup()
 
     def ingest(self, snapshot: Snapshot) -> None:
         """Ingest one snapshot completely before returning (IF-2).
