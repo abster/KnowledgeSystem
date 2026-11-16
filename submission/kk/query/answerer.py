@@ -80,6 +80,7 @@ from kk.query.slow import (
     history_view,
     loser_numbers,
     loser_scopes,
+    promote_newest_copies,
     published_date,
     stale_tables_detail,
     superseded_detail,
@@ -704,7 +705,7 @@ class Answerer:
                 None,
                 tuple(sorted(family)),
             )
-        return list(found.values())
+        return promote_newest_copies(list(found.values()))
 
     def _slow_request(
         self, run: _Run, groups: Sequence[CandidateGroup], pick: _Pick | None

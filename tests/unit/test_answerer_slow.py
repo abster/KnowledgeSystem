@@ -427,6 +427,47 @@ def test_a_news_page_is_labelled_with_its_publication_date(work_dir: Path) -> No
     assert "published 2025-06-20" in client.rerank_requests[0]
 
 
+# --- copied boilerplate with different numbers (decision 48) ----------------------------------
+
+
+def _news_pages() -> list[Page]:
+    dates = [("1", "June 20, 2025", 23), ("2", "October 8, 2025", 23), ("3", "April 6, 2026", 22)]
+    return [
+        Page(
+            f"https://example.test/newsroom/story-{n}",
+            f"Story {n}",
+            f"[A Writer](https://example.test/author)\n{stamp}\n\n# Story {n}\n\n"
+            f"Story {n} is about a different topic.\n\n## About\n\n"
+            f"Example CU has over 600 employees and {count} branch office locations. Learn more.\n",
+            "2026-05-12T00:00:00Z",
+        )
+        for n, stamp, count in dates
+    ]
+
+
+def _branch_run(question: str) -> str:
+    client = FakeStructured(
+        {"answerable": False, "answer": "", "evidence_ids": [], "loser_values_mentioned": []},
+        reranks=list(range(1, 40)),
+    )
+    ks = _system([_snap(1, "2026-05-12", *_news_pages())], client, floor=0.0)
+    ks.answer(question, None)
+    return str(client.calls[0]["user"])
+
+
+def test_the_newest_copy_of_a_repeated_blurb_comes_first_and_older_copies_stay() -> None:
+    user = _branch_run("How many branch office locations does Example CU have?")
+    assert "22 branch office locations" in user
+    assert "23 branch office locations" in user  # nothing is removed
+    assert user.index("22 branch office locations") < user.index("23 branch office locations")
+
+
+def test_a_change_question_still_sees_every_copy() -> None:
+    user = _branch_run("How has the number of branch office locations changed over time?")
+    assert "22 branch office locations" in user
+    assert "23 branch office locations" in user
+
+
 # --- stale pages that the question did not name -----------------------------------------------
 
 

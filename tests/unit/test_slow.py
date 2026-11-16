@@ -7,6 +7,7 @@ Facts and pages are invented. Evidence ids in the payload are ``F<n>`` for resol
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -27,6 +28,7 @@ from kk.query.slow import (
     history_view,
     loser_numbers,
     loser_scopes,
+    promote_newest_copies,
     published_date,
     stale_tables,
     stale_tables_detail,
@@ -860,3 +862,119 @@ def test_list_numbering_in_an_answer_needs_no_grounding() -> None:
     request = build_request(_inputs([], chunks=(chunk,)))
     path, _ = _path(accepted("(1) The beneficiary name. (2) The ABA number.", "C1"))
     assert path.answer(request, QUESTION).answer is not None
+
+
+def _dated(
+    n: int, published: str | None, effective: str | None = None, text: str = "Some page text."
+) -> ParentChunk:
+    return ParentChunk(
+        f"c{n}", URL, "News", text, 0.9 - n / 100, 2, published=published, effective_date=effective
+    )
+
+
+def test_dated_evidence_is_listed_newest_first_with_the_recency_rule() -> None:
+    chunks = (
+        _dated(1, "2025-06-20"),
+        _dated(2, "2026-04-06"),
+        _dated(3, "2024-01-02"),
+        _dated(4, None),
+    )
+    user = build_request(_inputs([], chunks=chunks)).user
+    assert "Dated evidence, newest first:" in user
+    line = user.split("Dated evidence, newest first:")[1].splitlines()[0]
+    assert line.index("C2") < line.index("C1") < line.index("C3")
+    assert "C4" not in line  # undated evidence has no date to rank
+    assert "newest" in user.split("Dated evidence, newest first:")[1]
+
+
+def test_an_effective_date_ranks_like_a_publication_date() -> None:
+    chunks = (_dated(1, None, effective="2026-09-25"), _dated(2, "2026-01-01"))
+    line = (
+        build_request(_inputs([], chunks=chunks))
+        .user.split("Dated evidence, newest first:")[1]
+        .splitlines()[0]
+    )
+    assert line.index("C1") < line.index("C2")
+    assert "2026-09-25" in line
+
+
+def test_no_recency_note_without_two_different_dates() -> None:
+    one = (_dated(1, "2025-06-20"), _dated(2, "2025-06-20"), _dated(3, None))
+    assert "Dated evidence, newest first" not in build_request(_inputs([], chunks=one)).user
+    assert "Dated evidence, newest first" not in build_request(_inputs([], chunks=())).user
+
+
+def test_the_prompt_makes_the_latest_date_the_first_rule_for_changing_values() -> None:
+    body = SYSTEM_PROMPT.split("Rules:\n")[1]
+    assert body.splitlines()[0].startswith("- RECENCY")
+    assert "effective date" in body.splitlines()[0]
+    assert "publication date" in body.splitlines()[0]
+    assert "more directly or more often" in SYSTEM_PROMPT
+    assert "does not count" in SYSTEM_PROMPT  # undated or silent evidence never overrides
+
+
+# --- the newest copy of a changing sentence is always read (decision 48) ---------------------
+
+BLURB = "It has over 600 employees and {n} branch office locations."
+
+
+def _page(n: int, count: int, date: str | None, score: float = 0.5, tail: str = "") -> ParentChunk:
+    return ParentChunk(
+        f"p{n}",
+        f"https://example.test/news/{n}",
+        "News",
+        f"A story. {BLURB.format(n=count)}{tail}",
+        score,
+        2,
+        published=date,
+    )
+
+
+def _scores(chunks: Sequence[ParentChunk]) -> dict[str, float]:
+    return {c.chunk_id: c.score for c in chunks}
+
+
+def test_the_newest_copy_of_a_changing_sentence_is_promoted_to_the_front() -> None:
+    chunks = [_page(1, 23, "2025-10-08", 0.9), _page(2, 23, "2026-03-02", 0.8)]
+    chunks.append(_page(3, 22, "2026-04-06", 0.1))
+    scores = _scores(promote_newest_copies(chunks))
+    assert scores["p3"] > 1.0 > scores["p1"]
+    assert scores["p1"] == 0.9 and scores["p2"] == 0.8  # the others keep their score
+
+
+def test_nothing_is_removed_or_reordered() -> None:
+    chunks = [_page(1, 23, "2025-10-08"), _page(2, 22, "2026-04-06")]
+    out = promote_newest_copies(chunks)
+    assert [c.chunk_id for c in out] == ["p1", "p2"]
+    assert [c.text for c in out] == [c.text for c in chunks]
+
+
+def test_a_sentence_on_one_page_or_with_the_same_figures_is_not_a_change() -> None:
+    same = [_page(1, 23, "2025-10-08", 0.4), _page(2, 23, "2026-04-06", 0.3)]
+    assert _scores(promote_newest_copies(same)) == _scores(same)
+    one = [_page(1, 23, "2026-04-06", 0.4)]
+    assert _scores(promote_newest_copies(one)) == _scores(one)
+
+
+def test_undated_chunks_are_never_compared() -> None:
+    chunks = [_page(1, 23, None, 0.4), _page(2, 22, None, 0.3), _page(3, 21, "2026-01-01", 0.2)]
+    assert _scores(promote_newest_copies(chunks)) == _scores(chunks)
+
+
+def test_a_sentence_without_digits_is_never_a_changing_statement() -> None:
+    a = ParentChunk("a", "u1", "N", "We love members.", 0.4, 2, published="2025-01-01")
+    b = ParentChunk("b", "u2", "N", "We adore members.", 0.3, 2, published="2026-01-01")
+    assert _scores(promote_newest_copies([a, b])) == {"a": 0.4, "b": 0.3}
+
+
+def test_a_tie_on_the_date_promotes_the_better_ranked_copy() -> None:
+    chunks = [_page(1, 23, "2026-04-06", 0.2), _page(2, 22, "2026-04-06", 0.8)]
+    scores = _scores(promote_newest_copies(chunks))
+    assert scores["p2"] > 1.0 and scores["p1"] == 0.2
+
+
+def test_the_comparison_is_per_sentence_not_per_chunk() -> None:
+    older = _page(1, 23, "2025-10-08", 0.9, tail=" Visit us today.")
+    newer = _page(2, 22, "2026-04-06", 0.1, tail=" Thanks for reading.")
+    scores = _scores(promote_newest_copies([older, newer]))
+    assert scores["p2"] > 1.0  # the surrounding words differ but the blurb sentence matches

@@ -58,8 +58,12 @@ To rebuild this folder from the repository: `make package` writes `dist/submissi
   otherwise hide the answer). A second short Haiku call then picks the passages most likely to
   hold the answer from the 150 best candidates. The model reads the top 60 chunks and gets each table (all rows, header, footer date) or each prose hit
   with its neighbours under the same heading. Link targets are kept in prose (`text (url)`).
-* News and blog pages are labelled with their publication date, and the model is told to use the
-  newest page when pages disagree (a branch count that changed over time, for example).
+* News and blog pages are labelled with their publication date. The model is told, as its first
+  rule, to use the value in the evidence with the latest effective or publication date when the
+  evidence disagrees (a branch count that changed over time, for example), and the payload lists
+  the newest dated evidence. The newest page's copy of a sentence that changes between pages is
+  also kept ahead of older copies when the payload is cut to its size limit. This is an
+  instruction to a model, so it holds most of the time but not always.
 * A number that equals a stale value is rejected only when the answer cites the evidence that
   replaced it, so a stale `0.00%` in an old table of one product does not block a correct answer
   about another. Anything unscoped or unexplained is still rejected.

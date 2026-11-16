@@ -64,19 +64,20 @@ SYSTEM_PROMPT = (
     "You answer member questions about Dupaco Community Credit Union from the evidence supplied "
     "in the user message, as of the snapshot date given there.\n"
     "Rules:\n"
+    "- RECENCY: when pieces of evidence state different values for the same thing (a count, a "
+    "rate, an hour), the value in the evidence with the latest date is the current one. Use the "
+    "latest effective date, or the latest publication date for news and blog pages marked "
+    "published, and state only that value. Do not mention older values, earlier years or "
+    "superseded figures, even for context, unless the question asks how something changed. Do "
+    "not prefer a value because a page states it more directly or more often, or because more "
+    "pages repeat it. Evidence that is undated, or that does not mention the thing, does not "
+    "count against a dated value.\n"
     "- Answer only from the supplied evidence. If the evidence does not contain the answer, "
     "set answerable to false and leave answer empty.\n"
     "- Never state a value that the evidence marks as stale, expired, ended or superseded, and "
     "never state a value from a conflict that is marked unresolved. A value is otherwise current: "
     "an effective date only says when it started, so do not call a value stale because that date "
     "is earlier than the snapshot date.\n"
-    "- When sources give different values for the same thing, use the one with the latest "
-    "effective date and state only that value. Do not mention older values, earlier years or "
-    "superseded figures, even for context, unless the question asks how something changed.\n"
-    "- Evidence marked published carries a publication date. When pages with different "
-    "publication dates state different values for the same thing, such as a count that changes "
-    "over time, use the value on the page with the newest publication date and state only that "
-    "value.\n"
     "- If the evidence answers the question only for particular branches, products or programs "
     "and the question is general (hours listed branch by branch, for example), do not refuse: "
     "give what the evidence states, name the branch, product or program each part applies to, "
@@ -444,6 +445,50 @@ def _fact_line(index: int, version: FactVersion, entry: bool) -> str:
     return f"{line}  <- ENTRY TIER" if entry else line
 
 
+PROMOTED_SCORE = 2.0  # above every ranking score (1 / (place + 1) is at most 1)
+_DIGITS = re.compile(r"\d+")
+_SPACES = re.compile(r"\s+")
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+def _sentence_key(sentence: str) -> str:
+    return _SPACES.sub(" ", _DIGITS.sub("#", sentence)).strip().lower()
+
+
+def promote_newest_copies(chunks: Sequence[ParentChunk]) -> list[ParentChunk]:
+    """Put the newest page's copy of a changing sentence first, so the cap cannot drop it (SRET-7).
+
+    A closing paragraph is copied onto many news pages and each copy carries the figures of its
+    day ("23 branch office locations" until March, "22" after). The chunks are ranked by
+    relevance, not date, so with a 12,000 character cap the newest copy can fall outside while
+    older copies are read. A sentence that holds a digit and appears on at least two dated pages
+    with different figures (the same sentence once digits are masked) is a changing statement;
+    the chunk with its newest dated copy (ties: the better ranked) is promoted to the front.
+    Nothing is removed: older copies stay, so history and as-of questions lose no evidence.
+    Undated chunks and tables are never compared.
+
+    Args:
+        chunks: The chunks offered to the model.
+
+    Returns:
+        The same chunks, with the newest copies given the highest score.
+    """
+    copies: dict[str, list[tuple[ParentChunk, str]]] = {}
+    for chunk in chunks:
+        if not chunk.published:
+            continue
+        for sentence in _SENTENCE_END.split(chunk.text):
+            if _DIGITS.search(sentence):
+                copies.setdefault(_sentence_key(sentence), []).append((chunk, sentence.strip()))
+    promoted: set[str] = set()
+    for members in copies.values():
+        if len({c.url for c, _ in members}) < 2 or len({t for _, t in members}) < 2:  # noqa: PLR2004
+            continue
+        newest = max((c for c, _ in members), key=lambda c: (c.published or "", c.score))
+        promoted.add(newest.chunk_id)
+    return [replace(c, score=PROMOTED_SCORE) if c.chunk_id in promoted else c for c in chunks]
+
+
 def _select_chunks(chunks: Sequence[ParentChunk]) -> list[ParentChunk]:
     """Best score first, within ``MAX_CHUNK_CHARS`` in total (the last one may be cut)."""
     chosen: list[ParentChunk] = []
@@ -496,7 +541,10 @@ def build_request(inputs: SlowInputs) -> SlowRequest:  # noqa: PLR0914
         fact_lines.append(_fact_line(index, winner, winner.fact.fact_key in entry))
         evidence[f"F{index}"] = _fact_evidence(index, winner, inputs.snapshot_id)
     chunk_blocks: list[str] = []
+    dated_at: list[tuple[str, str]] = []
     for number, chunk in enumerate(_select_chunks(inputs.chunks), start=1):
+        if chunk.effective_date or chunk.published:
+            dated_at.append((f"C{number}", chunk.effective_date or chunk.published or ""))
         path = " > ".join(chunk.headers) if chunk.headers else chunk.title
         dated = [
             f"{word} {value}"
@@ -532,6 +580,9 @@ def build_request(inputs: SlowInputs) -> SlowRequest:  # noqa: PLR0914
             + "\n".join(f"- {line}" for line in inputs.history_lines)
         )
     sections.append("Page text:\n" + ("\n\n".join(chunk_blocks) if chunk_blocks else "(none)"))
+    note = _recency_note(dated_at)
+    if note:
+        sections.append(note)
     winner_texts = [g.winner.fact.value_text for g in resolved if g.winner is not None]
     phrases = [qualifier_phrase(g.winner.fact.qualifiers) or "" for g in resolved if g.winner]
     winners = numbers_of([*winner_texts, *text_values, *phrases, inputs.question, inputs.taken_on])
@@ -548,6 +599,30 @@ def build_request(inputs: SlowInputs) -> SlowRequest:  # noqa: PLR0914
         chunk_units=_PAGE_UNITS if not _has_tier_siblings(facts) else _THRESHOLD_UNITS,
         relax_stale=bool(inputs.history_lines),
         conflict_note=inputs.conflict_note,
+    )
+
+
+RECENCY_LISTED = 6  # newest dated pages named in the recency note
+
+
+def _recency_note(dated_at: Sequence[tuple[str, str]]) -> str:
+    """Name the newest dated evidence (SRET-5), or ``""`` unless two different dates are shown.
+
+    Each item is a chunk id and its effective date, or its publication date when it has none.
+    Pages that state a changing figure (a branch count) disagree by date, and a model tends to
+    prefer the page that states it most directly. The note ranks the dated evidence so the
+    newest is plain to see. It only labels what the pages say; it is not a resolution step.
+    """
+    if len({date for _, date in dated_at}) < 2:  # noqa: PLR2004 - two dates make a conflict
+        return ""
+    newest = sorted(dated_at, key=lambda item: item[1], reverse=True)[:RECENCY_LISTED]
+    listed = ", ".join(f"{cid} ({date})" for cid, date in newest)
+    return (
+        f"Dated evidence, newest first: {listed}.\n"
+        "If this evidence states different values for the same thing, the current value is the "
+        "one in the newest evidence that states it, even when older evidence states a different "
+        "value more directly or more often. Evidence that does not mention the thing does not "
+        "count."
     )
 
 
