@@ -95,3 +95,25 @@ python harness/run_eval.py --submission submission --eval eval/public_eval.jsonl
 ```
 
 `make package` assembles the complete hand-in in `dist/submission/` and `dist/submission.zip`.
+
+### Running from a clone of the repository
+
+The repository holds the code only. It leaves out the supplied snapshots, `harness/`, `eval/`,
+the API key, the embedding weights and the caches built from the website data. To run a clone
+against the kit:
+
+```bash
+git clone https://github.com/abster/KnowledgeSystem.git
+cd KnowledgeSystem
+pip install -r submission/requirements.txt
+PYTHONPATH=submission python tools/fetch_model.py     # downloads the embedding weights once (about 64 MB)
+export ANTHROPIC_API_KEY=...                          # or a .env file at the repository root
+cd <kit folder>                                       # the folder with harness/, eval/ and snapshots/
+python harness/run_eval.py --submission <path to clone>/submission --eval eval/public_eval.jsonl --out results/run
+```
+
+* The first ingest has no extraction cache, so prose facts are extracted with the API and cached
+  under `submission/cache/`. `submission/NOTES.md` (Timing) gives the expected durations: tens of
+  minutes for the first ingest with a key, about a minute afterwards.
+* Without a key the first run still builds and ingests, but questions that need the slow path are
+  refused (see `submission/NOTES.md`).
