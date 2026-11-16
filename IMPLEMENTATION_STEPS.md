@@ -15,7 +15,7 @@ A step is ticked only after its work is committed and you have approved it. A se
 - [x] Step 7: Storage, embeddings, retrieval and ingest wiring
 - [x] Step 8: LLM client, prose facts and the extraction cache
 - [x] Step 9: Fast-path `answer()`, cache and calibration
-- [ ] Step 10: Slow path, packaging and README
+- [x] Step 10: Slow path, packaging and README
 
 ## 1. How every step works
 
