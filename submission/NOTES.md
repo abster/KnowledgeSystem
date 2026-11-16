@@ -52,9 +52,11 @@ To rebuild this folder from the repository: `make package` writes `dist/submissi
 * Fast path: the decision stage takes about 0.13 s (median), but real wording rarely passes its
   coverage check, so on the public questions every answer takes the slow path: median about 7 s,
   p95 8 to 10.5 s, slowest 10 to 12 s over five runs. The slow-path deadline is 15 s (one retry)
-  and the speed score reaches zero at 20 s. Latency was traded for accuracy on purpose. Two runs
-  showed stalls far above the deadline (one with a full disk, one of 115 s of unknown cause), so
-  the deadline is a target and not a hard guarantee.
+  and the speed score reaches zero at 20 s. Latency was traded for accuracy on purpose. Two evaluation
+  runs reported answers of 1,003 s and 115 s; the power log shows the laptop asleep during both, and
+  the harness times with wall-clock time, so keep the machine awake while evaluating. The 15 s
+  deadline wraps the slow-model call only; the query rewrite and rerank calls before it have their
+  own 6 s limits, so a whole answer can pass 15 s if those are slow. Treat the deadline as a target.
 
 ## How the slow path reads the site
 
