@@ -191,7 +191,7 @@ Local `bge-small-en-v1.5` via fastembed (ONNX Runtime): 384 dimensions, CPU only
 
 | Option | Pro | Con |
 |---|---|---|
-| Local bge-small (chosen) | offline, deterministic, free, fast | slightly lower quality than large models |
+| Local bge-small (chosen) | offline once the weights are present (bundled; a clone downloads them once), deterministic, free, fast | slightly lower quality than large models |
 | Local bge-base / large | better recall | 3–10× slower ingest, more RAM on an 8 GB machine |
 | API embeddings (Voyage, OpenAI) | best quality | needs network and key at ingest; non-reproducible |
 | TF-IDF / hashed rules | trivial | weak on paraphrase ("lost debit card" vs "card replacement") |
@@ -676,7 +676,7 @@ Two project skills with **distinct names**. Each states that it supersedes the u
 Whether to answer from retrieved text or from resolved facts. Text-only answers are simpler but let a stale paragraph with a plausible number through, and the scorer zeroes any stale value. Resolved facts give correctness and consistency, but they add an extraction layer whose qualifier normalisation ("60-month" vs "5 year", "$100k" vs "$100,000") is the likeliest place for silent errors. The compromise is rule-based table extraction, cached prose extraction, a validator that checks every number against evidence, and the slow path as a safety net.
 
 ### Risks and open items
-1. Embedding weights are bundled in the submission folder (decided), since an offline grader would make a download a total-failure risk. Open: confirm the folder size is acceptable.
+1. Embedding weights are bundled in the submission folder (decided), since an offline grader would make a download a total-failure risk. A clone of the repository has no weights, so its first build downloads them once; a packaged submission never uses the network (SPEC decision 50).
 2. The `first_seen/last_seen` interval refinement and the `snapshot_recency` tie-break (step 3) are approved additions to the original proposal; revisit if the eval shows they hurt.
 3. Confidence thresholds calibrated on 40 questions can overfit. Mitigated by synthetic paraphrases and a held-out split.
 4. LLM extraction nondeterminism, mitigated by caching, the verbatim-quote and digit checks (PRO-3) and ingest-time verification; sampling cannot be pinned (see "Model choice and determinism").

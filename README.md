@@ -106,14 +106,30 @@ against the kit:
 git clone https://github.com/abster/KnowledgeSystem.git
 cd KnowledgeSystem
 pip install -r submission/requirements.txt
-PYTHONPATH=submission python tools/fetch_model.py     # downloads the embedding weights once (about 64 MB)
 export ANTHROPIC_API_KEY=...                          # or a .env file at the repository root
 cd <kit folder>                                       # the folder with harness/, eval/ and snapshots/
 python harness/run_eval.py --submission <path to clone>/submission --eval eval/public_eval.jsonl --out results/run
 ```
 
-* The first ingest has no extraction cache, so prose facts are extracted with the API and cached
-  under `submission/cache/`. `submission/NOTES.md` (Timing) gives the expected durations: tens of
-  minutes for the first ingest with a key, about a minute afterwards.
-* Without a key the first run still builds and ingests, but questions that need the slow path are
-  refused (see `submission/NOTES.md`).
+**First build, automatic.** Nothing else is needed.
+
+* The embedding weights (about 64 MB) are downloaded once into `submission/models/`. The log says
+  so; the library prints two `ERROR` lines about a missing local model just before it downloads,
+  which is expected. `KK_FETCH_MODEL=0` switches the download off, and
+  `PYTHONPATH=submission python tools/fetch_model.py` fetches the weights ahead of time.
+* The extraction cache (prose facts, needs the API key) and the vector cache are built during the
+  first ingest and stored under `submission/cache/`. `submission/NOTES.md` (Timing) gives the
+  durations: tens of minutes for the first ingest with a key.
+* Later runs reuse the weights and both caches: about a minute for the ingest.
+
+**Shortcut: take the caches and weights from the zip.** If you were sent `submission.zip` (or
+the smaller `extraction_cache.zip`), unpack it from the clone's top folder and the first build
+has nothing left to download or rebuild:
+
+```bash
+unzip -o submission.zip "submission/cache/*" "submission/models/*"   # weights and both caches
+unzip -o extraction_cache.zip                                        # the extraction cache only
+```
+
+Without a key the first run still builds and ingests, but questions that need the slow path are
+refused (see `submission/NOTES.md`).

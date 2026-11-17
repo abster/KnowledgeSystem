@@ -1,8 +1,9 @@
 """Local embeddings with ``bge-small-en-v1.5`` through fastembed (SPEC 6.8, EMB-1 to EMB-4).
 
-The weights are read from ``submission/models/`` and never fetched at runtime: a missing model
-is a packaging bug, reported by ``ModelMissingError`` (``make fetch-model`` is the developer
-command that downloads the weights once).
+The weights are read from ``submission/models/`` with ``local_files_only``, so a packaged
+submission never touches the network. If the folder has no weights (a clone of the repository),
+the first build downloads them once (EMB-1); ``KK_FETCH_MODEL=0`` switches that off, and
+``make fetch-model`` fetches them ahead of time. A failed download is a ``ModelMissingError``.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import os
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -29,7 +30,7 @@ _log = get_logger("embed")
 
 
 class ModelMissingError(RuntimeError):
-    """The model weights are not in the submission folder (a packaging bug, EMB-1)."""
+    """The model weights are not in the submission folder and could not be fetched (EMB-1)."""
 
 
 class EmbeddingError(RuntimeError):
@@ -56,8 +57,17 @@ def normalise_rows(matrix: np.ndarray) -> np.ndarray:
     return (rows / safe).astype(np.float32)
 
 
+def _load_model(directory: Path, *, local_only: bool) -> Any:  # noqa: ANN401 - fastembed type is lazy
+    """Load ``bge-small-en-v1.5`` from ``directory``; with ``local_only`` never use the network."""
+    from fastembed import TextEmbedding  # noqa: PLC0415 - heavy import, kept lazy
+
+    if not local_only:
+        directory.mkdir(parents=True, exist_ok=True)
+    return TextEmbedding(MODEL_NAME, cache_dir=str(directory), local_files_only=local_only)
+
+
 class Embedder:
-    """``bge-small-en-v1.5`` loaded from local files only."""
+    """``bge-small-en-v1.5``, read from local files; downloaded once only if missing (EMB-1)."""
 
     def __init__(self, model_dir: Path | None = None) -> None:
         """Load the model.
@@ -67,15 +77,20 @@ class Embedder:
         """
         directory = model_dir or MODEL_DIR
         hint = f"model weights not found under {directory}; run `make fetch-model` once"
-        if not directory.is_dir():
-            raise ModelMissingError(hint)
-        os.environ.setdefault("HF_HUB_OFFLINE", "1")  # EMB-1: never touch the network
         try:
-            from fastembed import TextEmbedding  # noqa: PLC0415 - heavy import, kept lazy
-
-            self._model = TextEmbedding(MODEL_NAME, cache_dir=str(directory))
-        except Exception as exc:  # noqa: BLE001 - any load failure means the package is broken
-            raise ModelMissingError(f"{hint} ({type(exc).__name__})") from exc
+            self._model = _load_model(directory, local_only=True)
+            return
+        except Exception as exc:  # noqa: BLE001 - any local failure means the weights are absent
+            local_error = exc
+        if os.environ.get("KK_FETCH_MODEL", "1") == "0":
+            raise ModelMissingError(f"{hint} ({type(local_error).__name__})") from local_error
+        _log.warning(
+            "model weights missing under %s: downloading them once (about 64 MB)", directory
+        )
+        try:
+            self._model = _load_model(directory, local_only=False)
+        except Exception as exc:  # noqa: BLE001 - no network or a broken download
+            raise ModelMissingError(f"{hint} (download failed: {type(exc).__name__})") from exc
 
     def _embed(self, texts: Sequence[str]) -> np.ndarray:
         return normalise_rows(np.array(list(self._model.embed(list(texts), batch_size=BATCH_SIZE))))

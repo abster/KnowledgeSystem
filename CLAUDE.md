@@ -14,7 +14,7 @@ keep them short and update `NOTES.md` first.
 * Python 3.12 for development; the submission stays compatible with 3.10+.
 * `uv` for environments and the lock file.
 * LanceDB (embedded, no database service) for chunks, facts and conflicts.
-* fastembed with `bge-small-en-v1.5` (ONNX weights bundled in the submission, offline).
+* fastembed with `bge-small-en-v1.5` (ONNX weights bundled in the submission, offline; a clone downloads them once on the first build).
 * `anthropic` SDK for extraction (Haiku class) and the slow path (Sonnet class).
 * `markdown-it-py` for parsing pages.
 * Tooling: ruff, mypy `--strict`, bandit, pip-audit, pytest, pytest-cov, hypothesis, pre-commit.

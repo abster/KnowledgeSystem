@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from kk.ingest import embed as embed_module
 from kk.ingest.embed import (
     DIM,
     MODEL_DIR,
@@ -24,9 +26,60 @@ needs_model = pytest.mark.skipif(
 )
 
 
-def test_missing_weights_raise_a_clear_error_without_touching_the_network(tmp_path: Path) -> None:
+class _Loader:
+    """A stand-in for ``_load_model`` that records each call and fails the chosen ones."""
+
+    def __init__(self, fail_local: bool, fail_remote: bool = False) -> None:
+        self.calls: list[bool] = []
+        self._fail_local = fail_local
+        self._fail_remote = fail_remote
+
+    def __call__(self, directory: Path, *, local_only: bool) -> object:
+        self.calls.append(local_only)
+        if (local_only and self._fail_local) or (not local_only and self._fail_remote):
+            raise OSError("model files not available")
+        return object()
+
+
+def test_present_weights_load_locally_and_never_touch_the_network(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    loader = _Loader(fail_local=False)
+    monkeypatch.setattr(embed_module, "_load_model", loader)
+    Embedder(model_dir=tmp_path)
+    assert loader.calls == [True]
+
+
+def test_missing_weights_are_fetched_once_and_say_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    loader = _Loader(fail_local=True)
+    monkeypatch.setattr(embed_module, "_load_model", loader)
+    monkeypatch.delenv("KK_FETCH_MODEL", raising=False)
+    with caplog.at_level(logging.WARNING):
+        Embedder(model_dir=tmp_path / "nothing-here")
+    assert loader.calls == [True, False]
+    assert "downloading" in caplog.text.lower()
+
+
+def test_a_failed_download_raises_the_clear_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    loader = _Loader(fail_local=True, fail_remote=True)
+    monkeypatch.setattr(embed_module, "_load_model", loader)
+    monkeypatch.delenv("KK_FETCH_MODEL", raising=False)
     with pytest.raises(ModelMissingError, match="make fetch-model"):
         Embedder(model_dir=tmp_path / "nothing-here")
+    assert loader.calls == [True, False]
+
+
+def test_fetching_can_be_switched_off(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    loader = _Loader(fail_local=True)
+    monkeypatch.setattr(embed_module, "_load_model", loader)
+    monkeypatch.setenv("KK_FETCH_MODEL", "0")
+    with pytest.raises(ModelMissingError, match="make fetch-model"):
+        Embedder(model_dir=tmp_path / "nothing-here")
+    assert loader.calls == [True]
 
 
 def test_rows_are_normalised_to_unit_length_and_zero_rows_survive() -> None:

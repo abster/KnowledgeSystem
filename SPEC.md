@@ -19,7 +19,7 @@ Decisions confirmed with the product owner while drafting this spec:
 | # | Decision | Effect on the spec |
 |---|---|---|
 | D1 | Answer-cache key is the exact canonical key built by question extraction (shape, entity, sorted qualifiers, `target_ord`). No embedding-similarity cache. Only fully understood questions are cached. | Section 11 |
-| D2 | The embedding weights are bundled in the submission folder. | Sections 2, 6.8 |
+| D2 | The embedding weights are bundled in the submission folder; a clone without them downloads them once on the first build (decision 50). | Sections 2, 6.8 |
 | D3 | Change and history questions that match an anchored history pattern are answered on the fast path by a `history` template built from stored fact intervals. Other change-cue questions go to the slow path with a fact-history view. | Sections 8.6, 9.4, 12.5, 13.3 |
 | D4 | One chunk row per unique chunk with a validity interval, and `snapshot_recency` as a third conflict tie-break, are approved. | Sections 5, 6.4, 10 |
 | D5 | An Anthropic API key exists at development time and is **not** assumed at grading. The extraction cache is generated at development time and shipped. Without a key, slow-path questions are refused and `NOTES.md` says so. | Sections 6.7, 13, 14 |
@@ -43,7 +43,7 @@ repo root
     kk/                       the package (section 2.1)
 ```
 
-`submission/` MUST run with `pip install -r submission/requirements.txt` and no other setup, offline, with Python 3.10 or newer. It MUST NOT write into the snapshot folders and MUST write its working data (the LanceDB directory, logs) under a path given by the `KK_WORK_DIR` environment variable, defaulting to a fresh temporary directory per `build()`.
+`submission/` MUST run with `pip install -r submission/requirements.txt` and no other setup, offline once the weights are present (a clone downloads them once, EMB-1), with Python 3.10 or newer. It MUST NOT write into the snapshot folders and MUST write its working data (the LanceDB directory, logs) under a path given by the `KK_WORK_DIR` environment variable, defaulting to a fresh temporary directory per `build()`.
 
 ### 2.1 Package modules
 
@@ -114,7 +114,7 @@ All numbers that this spec calls "initial" live in `submission/config.json`, are
 
 The contract is fixed by `harness/contract.py` and MUST NOT be changed. `submission/solution.py` MUST define `build() -> KnowledgeSystem` and nothing else the harness depends on.
 
-* **IF-1** `build()` MUST be cheap enough to call once and MUST load the embedding model, open the (empty) store and compile all patterns, so that the first `answer()` pays no start-up cost. It MUST NOT call the network.
+* **IF-1** `build()` MUST be cheap enough to call once and MUST load the embedding model, open the (empty) store and compile all patterns, so that the first `answer()` pays no start-up cost. It MUST NOT call the network, except for the one-time download of missing weights (EMB-1).
 * **IF-2** `ingest(snapshot)` is called once per snapshot, oldest first, and MUST be complete (all indices and the conflicts table updated) before it returns. It MUST NOT raise for a malformed page: the page is skipped, counted and logged.
 * **IF-3** `answer(question, as_of)` MUST return an `Answer` in every case, including internal errors, and MUST finish well inside 60 s (target: section 17).
 * **IF-4** `conflicts()` MUST return the records built by the last `ingest`, with no new analysis, in a stable order (section 10.6).
@@ -310,7 +310,7 @@ Outcomes (one logged decision per table): ACCEPT (facts emitted); ACCEPT inferre
 
 ### 6.8 Embeddings
 
-* **EMB-1** Model: `bge-small-en-v1.5` loaded with `fastembed` from the bundled `submission/models/` path. Loading MUST NOT use the network; if the weights are missing, `build()` raises a clear error (this is a packaging bug, not a runtime condition).
+* **EMB-1** Model: `bge-small-en-v1.5` loaded with `fastembed` from the bundled `submission/models/` path. The weights are read with `local_files_only`, so a packaged submission never uses the network. If `submission/models/` has no weights (a clone of the repository), the first build downloads them once (about 64 MB), logs that it is doing so, and later builds read them locally. `KK_FETCH_MODEL=0` switches the download off. If the weights are missing and cannot be fetched, `build()` raises a clear error that names `make fetch-model`.
 * **EMB-2** Only `table_row`, `text_paragraph` and `list_item` chunks are embedded, in batches of at most 64 texts and at most `embed.max_batch_chars` characters (a text counts at most 2,000 characters, the model's 512-token window), using the model's document prefix. Texts are batched in order of length and the vectors are returned in input order. The character limit exists because the memory of a batch grows with the square of its text length (SPEC decision 24). Questions use the model's query prefix.
 * **EMB-3** Only new chunk rows are embedded. Extended intervals reuse the stored vector.
 * **EMB-4** Vectors are L2-normalised so cosine similarity equals the dot product.
@@ -854,9 +854,11 @@ These were chosen while writing the spec because `DESIGN.md` did not settle them
 
 39. **Stale means replaced.** The first version of SRET-2 treated every non-winning value as stale and removed a chunk that carried the answer (two unrelated articles sharing a key, resolved by snapshot recency only). Staleness now needs evidence of replacement. Rate tables that give no facts are compared as generations of one table (decision above); on the real snapshots this finds exactly one stale table of 216.
 
+50. **Weights downloaded on the first build when missing (owner decision).** A clone of the public repository has no `submission/models/`. Instead of failing with an instruction, the first build downloads the weights once; a packaged submission has them and never touches the network (`local_files_only`). The cost is one network call in a run that has no weights, which the offline grader never makes because the package ships them. The extraction and vector caches already build themselves on the first ingest and are reused afterwards.
+
 ## 22. Deferred to the implementation plan
 
-* Exact `bge-small-en-v1.5` weight packaging and size (Step 7: fastembed's quantised ONNX build, about 64 MB, fetched once with `make fetch-model` into `submission/models/`).
+* Exact `bge-small-en-v1.5` weight packaging and size (Step 7: fastembed's quantised ONNX build, about 64 MB, fetched once into `submission/models/`, by `make fetch-model` or by the first build).
 * The measured ingest time and the extraction cache size.
 * Entity names for prose facts: the model names one product differently on different pages ("6 month certificate", "certificates"), so equal facts get different fact keys and some contradictions are missed (found in Step 8; the selftest conflict is one). To be settled in Step 9 together with entity linking.
 * The URL survey behind the authority rules.
