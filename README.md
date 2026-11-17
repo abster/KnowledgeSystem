@@ -96,6 +96,15 @@ python harness/run_eval.py --submission submission --eval eval/public_eval.jsonl
 
 `make package` assembles the complete hand-in in `dist/submission/` and `dist/submission.zip`.
 
+### How a question is answered
+
+A small rule-based **fast path** answers a question only when it fully understood it and is confident
+in one fact. Otherwise it **fails closed**: it does not guess, and the question goes to the **slow
+path** (a stronger model reading the retrieved evidence). That costs latency (about 7 s per question
+instead of well under a second) and buys accuracy, and it is a deliberate trade. In the current
+build most questions, including all 40 public ones, take the slow path. See `DESIGN.md`
+("Principle: fail closed").
+
 ### Running from a clone of the repository
 
 The repository holds the code only. It leaves out the supplied snapshots, `harness/`, `eval/`,

@@ -14,6 +14,14 @@ repository, not in this folder).
     cache. Results are cached by content, so a second ingest costs nothing.
 * The key is read only through `kk.llm.key`; it is never logged.
 
+### Fast path and slow path (fail closed)
+
+The fast path answers a question only when it fully understood it and is confident in one fact.
+When it is not sure it does not guess: the question goes to the slow path, which is slower but more
+accurate. Higher latency in exchange for accuracy is deliberate, and a low-confidence fast answer is
+never returned. In the current build most questions take the slow path (all 40 public ones). If
+the slow path is not available (no key, timeout), the answer is a safe refusal, not a fast guess.
+
 ### Without a key
 
 * `build()`, `ingest` (using the shipped cache in `cache/extraction/`) and `answer` all complete
