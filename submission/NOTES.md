@@ -55,7 +55,7 @@ To rebuild this folder from the repository: `make package` writes `dist/submissi
 
 **From a clone of the repository** (no `models/`, no `cache/`): nothing to prepare. The first
 build downloads the embedding weights once (about 64 MB; `KK_FETCH_MODEL=0` disables this) and the
-first ingest builds the extraction cache (needs the key, tens of minutes, see Timing) and the vector
+first ingest builds the extraction cache (needs the key, about an hour, see Timing) and the vector
 cache (8 to 10 minutes); later runs reuse all three. Run the harness from the kit folder with
 `--submission <path to clone>/submission`. The full steps are in the repository `README.md`.
 
@@ -75,8 +75,12 @@ minutes). Neither zip contains a key or any snapshot page.
 
 * `build()` loads the embedding model (a few seconds).
 * Ingest of all five snapshots with the shipped cache and the embedding cache: about a minute;
-  without the vector cache about 8 to 10 minutes. With no extraction cache and a key the first
-  ingest takes much longer (tens of minutes at 8 workers); the cache removes that cost.
+  without the vector cache about 8 to 10 minutes. **With no extraction cache the first ingest is
+  slow: measured in a clean clone of the repository (key set, 8 workers), it ran for 54 minutes
+  (3,227 s) before the API credit ran out, and finishing it took another 3.7 minutes. That is over
+  the harness's 30-minute ingest limit (`ingest_over_limit` in the report).** Use the shipped
+  extraction cache (`extraction_cache.zip`, or `cache/` from `submission.zip`) to avoid this. A
+  rerun resumes from whatever is already cached.
 * Fast path: the decision stage takes about 0.13 s (median), but real wording rarely passes its
   coverage check, so on the public questions every answer takes the slow path: median about 7 s,
   p95 8 to 10.5 s, slowest 10 to 12 s over five runs. The slow-path deadline is 15 s (one retry)

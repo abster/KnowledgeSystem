@@ -119,10 +119,11 @@ python harness/run_eval.py --submission <path to clone>/submission --eval eval/p
   `PYTHONPATH=submission python tools/fetch_model.py` fetches the weights ahead of time.
 * The extraction cache (prose facts, needs the API key) and the vector cache are built during the
   first ingest and stored under `submission/cache/`. `submission/NOTES.md` (Timing) gives the
-  durations: tens of minutes for the first ingest with a key.
+  durations: a from-scratch ingest took 54 minutes in a clean clone, which is over the harness's
+  30-minute ingest limit, so use the shortcut below to avoid it.
 * Later runs reuse the weights and both caches: about a minute for the ingest.
 
-**Shortcut: take the caches and weights from the zip.** If you were sent `submission.zip` (or
+**Shortcut (recommended): take the caches and weights from the zip.** If you were sent `submission.zip` (or
 the smaller `extraction_cache.zip`), unpack it from the clone's top folder and the first build
 has nothing left to download or rebuild:
 
