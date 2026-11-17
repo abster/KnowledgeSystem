@@ -56,10 +56,20 @@ To rebuild this folder from the repository: `make package` writes `dist/submissi
 **From a clone of the repository** (no `models/`, no `cache/`): nothing to prepare. The first
 build downloads the embedding weights once (about 64 MB; `KK_FETCH_MODEL=0` disables this) and the
 first ingest builds the extraction cache (needs the key, tens of minutes, see Timing) and the vector
-cache (8 to 10 minutes); later runs reuse all three. To skip that, unpack `cache/` and `models/` from
-`submission.zip` into `submission/` (`extraction_cache.zip` holds the extraction cache only). Run the
-harness from the kit folder with `--submission <path to clone>/submission`. The full steps are in the
-repository `README.md`.
+cache (8 to 10 minutes); later runs reuse all three. Run the harness from the kit folder with
+`--submission <path to clone>/submission`. The full steps are in the repository `README.md`.
+
+**Using the pre-built files (shortcut).** From the clone's top folder:
+
+```bash
+unzip -o submission.zip "submission/cache/*" "submission/models/*"   # weights, extraction cache, vector cache
+unzip -o extraction_cache.zip                                        # or: the extraction cache only
+```
+
+`submission.zip` has everything, so the first ingest takes about a minute and nothing is downloaded.
+`extraction_cache.zip` holds only the extraction cache (the prose facts, which is what needs the API
+key and the most time); the weights are then downloaded once and the vectors are rebuilt (8 to 10
+minutes). Neither zip contains a key or any snapshot page.
 
 ## Timing
 
